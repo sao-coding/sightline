@@ -68,7 +68,7 @@ if (-not [Environment]::Is64BitOperatingSystem) { throw 'sight needs 64-bit Wind
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $base = if ($Version) {
-    "https://github.com/$repo/releases/download/$($Version.TrimStart('v'))"
+    "https://github.com/$repo/releases/download/v$($Version.TrimStart('v'))"
 } else {
     "https://github.com/$repo/releases/latest/download"
 }
