@@ -1,5 +1,5 @@
 ---
-default: minor
+default: major
 ---
 
 #### Initial release: observe and measure Windows apps

@@ -28,7 +28,7 @@ type = "PrepareRelease"
 
 [[workflows.steps]]
 type = "Command"
-command = "cargo update --workspace --offline"
+command = "cargo update --workspace"
 
 [[workflows.steps]]
 type = "Command"
@@ -55,7 +55,7 @@ type = "PrepareRelease"
 
 [[workflows.steps]]
 type = "Command"
-command = "cargo update --workspace --offline"
+command = "cargo update --workspace"
 
 [[workflows.steps]]
 type = "Command"
