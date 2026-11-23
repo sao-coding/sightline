@@ -79,7 +79,7 @@ jobs:
             echo '## Install'
             echo
             echo '```powershell'
-            echo "& ([scriptblock]::Create((irm https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/install.ps1))) -Version $version"
+            echo "\$env:SIGHT_VERSION = '$version'; irm https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/install.ps1 | iex"
             echo '```'
             echo
             echo 'Or download `sight.exe` below and put it on your `PATH`. Verify it with `sight.exe.sha256`.'

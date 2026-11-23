@@ -63,9 +63,9 @@ Open a **new terminal** afterwards so the `PATH` change is picked up, then check
 Pin a version, change the folder, or uninstall:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -Version 0.1.0
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -InstallDir D:\tools\sight
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -Uninstall
+$env:SIGHT_VERSION = "0.1.0"; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
+$env:SIGHT_INSTALL_DIR = 'D:\tools\sight'; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
+$env:SIGHT_UNINSTALL = 1; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
 ```
 
 The script verifies the download against the `sight.exe.sha256` published with each release.

@@ -59,9 +59,9 @@ irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | ie
 装完请**打开新的终端**，让 `PATH` 生效，再运行 `sight doctor` 确认。指定版本、修改安装目录或卸载：
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -Version 0.1.0
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -InstallDir D:\tools\sight
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -Uninstall
+$env:SIGHT_VERSION = "0.1.0"; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
+$env:SIGHT_INSTALL_DIR = 'D:\tools\sight'; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
+$env:SIGHT_UNINSTALL = 1; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
 ```
 
 脚本会用每个版本附带的 `sight.exe.sha256` 校验下载内容。

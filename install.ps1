@@ -6,7 +6,7 @@
   irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
 
 .EXAMPLE
-  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -Version 0.1.0
+  $env:SIGHT_VERSION = "0.1.0"; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
 
 .PARAMETER Version
   Release to install, for example 0.1.0. Default: the latest. Env: SIGHT_VERSION.
@@ -15,10 +15,10 @@
   Where to put sight.exe. Default: %LOCALAPPDATA%\Programs\sight. Env: SIGHT_INSTALL_DIR.
 
 .PARAMETER NoPathUpdate
-  Do not add InstallDir to the user PATH.
+  Do not add InstallDir to the user PATH. Env: SIGHT_NO_PATH_UPDATE=1.
 
 .PARAMETER Uninstall
-  Remove sight.exe and its PATH entry.
+  Remove sight.exe and its PATH entry. Env: SIGHT_UNINSTALL=1.
 #>
 [CmdletBinding()]
 param(
@@ -27,6 +27,9 @@ param(
     [switch]$NoPathUpdate,
     [switch]$Uninstall
 )
+
+if ($env:SIGHT_UNINSTALL) { $Uninstall = $true }
+if ($env:SIGHT_NO_PATH_UPDATE) { $NoPathUpdate = $true }
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is very slow with the progress bar

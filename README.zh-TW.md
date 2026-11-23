@@ -59,9 +59,9 @@ irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | ie
 裝完請**開新的終端機**，讓 `PATH` 生效，再執行 `sight doctor` 確認。指定版本、改安裝資料夾或解除安裝：
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -Version 0.1.0
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -InstallDir D:\tools\sight
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1))) -Uninstall
+$env:SIGHT_VERSION = "0.1.0"; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
+$env:SIGHT_INSTALL_DIR = 'D:\tools\sight'; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
+$env:SIGHT_UNINSTALL = 1; irm https://raw.githubusercontent.com/sao-coding/sightline/main/install.ps1 | iex
 ```
 
 腳本會用每個版本附帶的 `sight.exe.sha256` 驗證下載內容。
