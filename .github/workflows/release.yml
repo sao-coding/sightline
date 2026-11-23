@@ -53,6 +53,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist, stage | Out-Null
           Copy-Item target/release/sight.exe dist/sight.exe
+          Copy-Item install.ps1 dist/install.ps1
           $hash = (Get-FileHash dist/sight.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  sight.exe" | Set-Content -Encoding ascii dist/sight.exe.sha256
           Copy-Item target/release/sight.exe, README.md, README.zh-CN.md, README.zh-TW.md, AGENTS.md, LICENSE, install.ps1 stage/
@@ -65,3 +66,28 @@ jobs:
         run: knope publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # knope titles the release "0.1.0 (date)". Retitle it "v0.1.0" and put the
+      # install commands for exactly this version above the changelog.
+      - name: Retitle release and add install notes
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="v$version"
+          changes=$(gh release view "$tag" --json body -q .body)
+          {
+            echo '## Install'
+            echo
+            echo '```powershell'
+            echo "& ([scriptblock]::Create((irm https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/install.ps1))) -Version $version"
+            echo '```'
+            echo
+            echo 'Or download `sight.exe` below and put it on your `PATH`. Verify it with `sight.exe.sha256`.'
+            echo
+            echo "## What's changed"
+            echo
+            echo "$changes"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release edit "$tag" --title "$tag" --notes-file "$RUNNER_TEMP/notes.md"
+        env:
+          GH_TOKEN: ${{ github.token }}

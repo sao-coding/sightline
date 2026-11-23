@@ -9,6 +9,9 @@ path = "dist/sight.exe"
 path = "dist/sight.exe.sha256"
 
 [[package.assets]]
+path = "dist/install.ps1"
+
+[[package.assets]]
 path = "dist/sight-windows-x64.zip"
 
 # Create a changeset in .changeset/ describing a user-facing change.
@@ -36,7 +39,7 @@ command = "git add Cargo.toml Cargo.lock CHANGELOG.md"
 
 [[workflows.steps]]
 type = "Command"
-command = "git commit -m \"chore: release $version\""
+command = "git commit -m \"chore: release v$version\""
 variables = { "$version" = "Version" }
 
 [[workflows.steps]]
@@ -63,7 +66,7 @@ command = "git add Cargo.toml Cargo.lock CHANGELOG.md"
 
 [[workflows.steps]]
 type = "Command"
-command = "git commit -m \"chore: release $version\""
+command = "git commit -m \"chore: release v$version\""
 variables = { "$version" = "Version" }
 
 [[workflows.steps]]

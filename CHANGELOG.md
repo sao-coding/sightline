@@ -1,6 +1,6 @@
 ## 0.1.0 (2026-11-23)
 
-### Breaking Changes
+### Features
 
 #### Initial release: observe and measure Windows apps
 
