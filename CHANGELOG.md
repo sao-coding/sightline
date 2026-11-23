@@ -1,6 +1,6 @@
----
-default: major
----
+## 0.1.0 (2026-11-23)
+
+### Breaking Changes
 
 #### Initial release: observe and measure Windows apps
 
@@ -9,3 +9,7 @@ default: major
 - `stat` samples CPU and memory of a process tree over time.
 - `doctor` lists monitors and their DPI scale.
 - Every command prints a single-line JSON envelope (`v`, `ok`, `data`, `warnings` or `error`) with stable error codes and exit codes.
+
+### Features
+
+- initial project setup
