@@ -21,9 +21,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - uses: Swatinem/rust-cache@v2.9.3
-      - uses: knope-dev/action@v2.1.2
-        with:
-          version: 0.24.0
+      - name: Install knope
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'knope'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          gh release download knope/v0.24.0 -R knope-dev/knope -p 'knope-x86_64-pc-windows-msvc.tgz' -D $dir
+          tar -xzf (Join-Path $dir 'knope-x86_64-pc-windows-msvc.tgz') -C $dir
+          $exe = Get-ChildItem $dir -Recurse -Filter knope.exe | Select-Object -First 1
+          Add-Content $env:GITHUB_PATH $exe.DirectoryName
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Configure git identity
         shell: bash
