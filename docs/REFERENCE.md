@@ -140,51 +140,94 @@ Record a window or region to an animated GIF, for README demos and test evidence
 | Flag | Default | Meaning |
 |---|---|---|
 | `--duration <ms>` | required | Recording length, counted from the first captured frame |
+| `--source auto\|screen\|window` | `auto` | Capture source, chosen once at the start. `--pid` / `--hwnd` only (`--region` is always screen) |
+| `--pad <N>` | `0` | Screen source: record N more px around the window, clamped to the desktop. `--pid` / `--hwnd` only |
+| `--cursor` | off | Include the mouse cursor (if the capture API allows hiding it, it is hidden by default) |
 | `--fps <N>` | `10` | Sampling rate, 1 to 30 |
 | `--max-edge <N>` | `800` | Downscale so the long edge is at most N px (`0` = full size) |
 | `--until-settled <ms>` | off | Stop once the image changed and then stayed unchanged for this long (never longer than `--duration`) |
 | `--keyframes <N>` | `0` | Also save N PNG stills of the most changed moments |
-| `--crop x,y,w,h` | | Window-relative crop, as for `shot` (`--pid` / `--hwnd` only) |
+| `--crop x,y,w,h` | | Frame-relative crop, as for `shot` (`--pid` / `--hwnd` only). With the screen source it may reach into the `--pad` area, but not beyond frame + pad |
 | `--out <path>` | temp dir | GIF path. Default `%TEMP%\sightline\rec-<timestamp>.gif`; stills are `<name>-key1.png`, ... next to it |
 
 `rec` **blocks** until the recording is done, so agents run it in the background while they act
-(see below). It uses the same Windows Graphics Capture sessions as `shot`, including the popup
-screen-capture fallback and multi-monitor regions.
+(see below). It uses the same Windows Graphics Capture sessions as `shot`.
+
+#### Capture source
+
+`rec` picks **one** source when it starts and never switches during the recording:
+
+- **`screen`**: monitor capture of the window's frame rect expanded by `--pad`, clamped to the virtual
+  desktop. It records what the user sees: menus, tooltips and popups, but also anything that covers the
+  window. One capture session per monitor is started (in parallel), and each frame is cut from the
+  monitor frame at the window's current position.
+- **`window`**: window capture of the window itself. Covering windows do not matter, but separate popup
+  windows (menus, dropdowns, tooltips) are not recorded. `--pad` has no effect here (warning
+  `rec_pad_ignored`).
+- **`auto`** (default): at the start, checks whether any other visible, non-cloaked top-level window above
+  the target in z-order intersects the target's DWM frame (plus `--pad`). Ignored: the target's own owned
+  windows and popups, same-process popup windows of the known popup classes (menus, tooltips,
+  dropdowns), invisible, minimized or cloaked windows, and layered windows with a constant alpha of 0
+  (they draw nothing). Tool windows and click-through overlays are counted, because they are visible.
+  Not covered: `screen`, `source_reason:"auto_not_occluded"`. Covered: `window`,
+  `source_reason:"auto_occluded"` and the warning `rec_window_source_no_popups`.
+
+`--source screen|window` forces a source (`source_reason:"forced"`). `--region` is always a screen
+capture.
+
+While recording:
+
+- **Moves.** In the screen source the captured rect follows the window for every frame; the canvas
+  keeps its start size and only its origin moves, so the window stays in place in the GIF. The formulas
+  in the output are valid for the start position, and `moved:true` is added if the window moved.
+- **Resizes.** The canvas size from the start is kept (later frames are cropped or padded) and the
+  warning `rec_window_resized` is added once.
+- **Occlusion changes.** A window covering or uncovering the target never changes the source. Each
+  change is recorded in `occlusion_events:[{t_ms, occluded}]` (checked every 250 ms; `t_ms` counts from
+  the start of the GIF) and adds the warning `rec_occlusion_changed`.
+
+Which source to use when the target is covered *and* opens menus: real menus (topmost tool windows such
+as WinForms context menus) are drawn above the covering window, so a `screen` recording shows them, and
+the covering window too where it overlaps. Ordinary owned popup windows stay right above their owner,
+below the covering window, so they are hidden under it in a screen recording and absent from a `window`
+recording. Uncover the window first when its popups matter.
+
+#### Output
 
 - **Frames.** The image is sampled at `--fps`; a frame is written only when pixels changed, and an
   unchanged stretch just extends the previous frame's delay. A static window records one frame with a
   long delay. Delays are whole centiseconds (the GIF unit) taken from a running timeline, and a busy
   machine can deliver fewer frames than `--fps`.
-- **Timing.** The clock starts at the first captured frame (capture start-up takes about 0.3 s), so
-  `elapsed_ms` is about 0.7 s longer than `duration_ms`.
+- **Timing.** The clock starts at the first captured frame (capture start-up takes about 0.3 s, and
+  the screen source starts a session per monitor in parallel), so `elapsed_ms` is about 0.7 s longer
+  than `duration_ms`.
 - **`--until-settled`** arms at the first change after the first frame. A window that is static when
   recording starts does not end it; if nothing ever changes, the full `--duration` is recorded.
-- **Output.** `path`, `frames`, `fps`, `duration_ms` (the GIF's own length), `image`, `size_bytes`,
-  `stopped` (`duration` or `settled`), `elapsed_ms`, and the same `maps_to`, `scale`, `dpi_scale`,
-  `monitor_dpi_scale`, `formula`, and for windows `window`, `formula_window`, `formula_client`,
-  `popups` as `shot`. They map GIF pixels (and keyframe pixels) to coordinates as of the start of the
-  recording. With `--keyframes N`, `keyframes` lists `{t_ms, path}`: the first frame, the last frame
-  and the frames with the biggest change in between (N in total, fewer when fewer distinct frames
-  exist), in time order; `t_ms` counts from the start of the GIF.
-- **Warnings.** `gif_large` (over about 10 MB), `window_resized_during_recording` (later frames are
-  cropped or padded to the first frame's size), plus the `shot` ones.
-- **Limits.** Popups are detected once, when recording starts: a menu that opens later is not in a
-  window recording (record a `--region` for that). The window position in the formulas is the one at
-  start.
+- **Fields.** `path`, `frames`, `fps`, `duration_ms` (the GIF's own length), `image`, `size_bytes`,
+  `source`, `source_reason`, `stopped` (`duration` or `settled`), `elapsed_ms`, and the same `maps_to`,
+  `scale`, `dpi_scale`, `monitor_dpi_scale`, `formula`, and for windows `window`, `formula_window`,
+  `formula_client` as `shot`, plus `occlusion_events` (window targets) and `moved` (only when true).
+  The formulas map GIF pixels (and keyframe pixels) to coordinates as of the start of the recording;
+  with `--pad` they have negative window and client offsets, because the canvas starts outside the
+  window. With `--keyframes N`, `keyframes` lists `{t_ms, path}`: the first frame, the last frame and
+  the frames with the biggest change in between (N in total, fewer when fewer distinct frames exist),
+  in time order; `t_ms` counts from the start of the GIF.
+- **Warnings.** `gif_large` (over about 10 MB), `rec_window_source_no_popups`, `rec_window_resized`,
+  `rec_occlusion_changed`, `rec_pad_ignored`.
 
 ```
-> sight rec --hwnd 11736012 --duration 4000 --keyframes 3 --out demo.gif
-{"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\rec-20261124-161200-100.gif","frames":22,"fps":10,"duration_ms":4000,"image":{"w":642,"h":452},"size_bytes":597570,"maps_to":{"space":"screen_physical","x":207,"y":150,"w":642,"h":452},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 207 + px / 1.0; screen_y = 150 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 0 + px / 1.0; win_y = 0 + py / 1.0","formula_client":"client_x = -1 + px / 1.0; client_y = -31 + py / 1.0","stopped":"duration","elapsed_ms":4504,"popups":[],"keyframes":[{"t_ms":1,"path":"...\\rec-20261124-161200-100-key1.png"},{"t_ms":1500,"path":"...\\rec-20261124-161200-100-key2.png"},{"t_ms":2700,"path":"...\\rec-20261124-161200-100-key3.png"}]},"warnings":[]}
+> sight rec --hwnd 11736012 --pad 20 --duration 3000 --keyframes 2 --out demo.gif
+{"v":1,"ok":true,"data":{"path":"...\\demo.gif","frames":2,"fps":10,"duration_ms":3000,"image":{"w":682,"h":492},"size_bytes":63545,"maps_to":{"space":"screen_physical","x":187,"y":130,"w":682,"h":492},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 187 + px / 1.0; screen_y = 130 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = -20 + px / 1.0; win_y = -20 + py / 1.0","formula_client":"client_x = -21 + px / 1.0; client_y = -51 + py / 1.0","source":"screen","source_reason":"auto_not_occluded","occlusion_events":[],"stopped":"duration","elapsed_ms":3378,"keyframes":[{"t_ms":1,"path":"...\\demo-key1.png"},{"t_ms":800,"path":"...\\demo-key2.png"}]},"warnings":[]}
 ```
 
-Running it in the background while acting (it needs about 0.3 s to start; wait ~0.5 s before the first
-action):
+Running it in the background while acting (the start takes about 0.3 s per monitor session, in
+parallel; wait ~0.7 s before the first action):
 
 ```powershell
-$job = Start-Job { sight rec --hwnd 123456 --duration 10000 --until-settled 500 --keyframes 3 --out C:\tmp\demo.gif }
-Start-Sleep -Milliseconds 500      # capture needs ~0.3 s to start
-# ... act with your own tool (click, type) ...
-$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json   # data.path, data.keyframes[].path
+$job = Start-Job { sight rec --hwnd 11736012 --duration 10000 --until-settled 500 --out C:\tmp\demo.gif }
+Start-Sleep -Milliseconds 700
+# ... act with your own tool ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json
 ```
 
 ### `stat`

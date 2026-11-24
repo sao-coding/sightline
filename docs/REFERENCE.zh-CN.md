@@ -96,34 +96,56 @@ JPEG 质量为 80。窗口截图（`--pid` / `--hwnd`）还会返回 `popups`（
 | 参数 | 默认值 | 含义 |
 |---|---|---|
 | `--duration <ms>` | 必填 | 录制时长，从捕获到第一帧时开始算 |
+| `--source auto\|screen\|window` | `auto` | 捕获来源，开始时选定一次。仅限 `--pid` / `--hwnd`（`--region` 永远是屏幕捕获） |
+| `--pad <N>` | `0` | 屏幕来源：在窗口四周多录 N 像素（限制在桌面范围内）。仅限 `--pid` / `--hwnd` |
+| `--cursor` | 关闭 | 录入鼠标指针（捕获 API 允许隐藏时，默认隐藏） |
 | `--fps <N>` | `10` | 采样帧率，1 到 30 |
 | `--max-edge <N>` | `800` | 缩小到长边不超过 N 像素（`0` 表示原尺寸） |
 | `--until-settled <ms>` | 关闭 | 图像发生变化后又连续这么久没变，就提前结束（不会超过 `--duration`） |
 | `--keyframes <N>` | `0` | 另外保存 N 张变化最大时刻的 PNG 静帧 |
-| `--crop x,y,w,h` | | 与 `shot` 相同的相对窗口裁剪（仅限 `--pid` / `--hwnd`） |
+| `--crop x,y,w,h` | | 与 `shot` 相同的相对窗口边框的裁剪（仅限 `--pid` / `--hwnd`）。屏幕来源下可以伸进 `--pad` 区域，但不能超出边框加 pad |
 | `--out <path>` | 临时目录 | GIF 路径。默认 `%TEMP%\sightline\rec-<时间戳>.gif`；静帧存为旁边的 `<name>-key1.png` 等 |
 
-`rec` **会阻塞**到录制结束，所以智能体应当在操作的同时让它在后台运行（见下）。它使用与 `shot` 相同的 Windows Graphics Capture 会话，包括弹出窗口的屏幕截图回退和跨显示器区域。
+`rec` **会阻塞**到录制结束，所以智能体应当在操作的同时让它在后台运行（见下）。它使用与 `shot` 相同的 Windows Graphics Capture 会话。
+
+#### 捕获来源
+
+`rec` 在启动时选定**一个**来源，录制过程中绝不切换：
+
+- **`screen`**：对窗口边框矩形加上 `--pad` 做显示器捕获，并限制在虚拟桌面内。录到的是用户看到的画面：菜单、提示框、弹出窗口都在，盖在窗口上的东西也会录进去。每个显示器启动一个捕获会话（并行启动），每一帧都按窗口当前位置从显示器画面中裁出来。
+- **`window`**：对窗口本身做窗口捕获。盖在上面的窗口不影响它，但独立的弹出窗口（菜单、下拉列表、提示框）不会被录到。这里 `--pad` 不起作用（警告 `rec_pad_ignored`）。
+- **`auto`**（默认）：开始时检查：是否有任何其他可见、未被 cloak 的顶层窗口位于目标之上（Z 序），并与目标的 DWM 边框（加 `--pad`）相交。不计入：目标自己拥有的窗口和弹出窗口、同进程且属于已知弹出类的窗口（菜单、提示框、下拉列表）、不可见/最小化/被 cloak 的窗口，以及固定 alpha 为 0 的分层窗口（它们什么也不画）。工具窗口和穿透点击的覆盖层会计入，因为它们看得见。没被盖住：`screen`，`source_reason:"auto_not_occluded"`。被盖住：`window`，`source_reason:"auto_occluded"`，并给出警告 `rec_window_source_no_popups`。
+
+`--source screen|window` 强制指定来源（`source_reason:"forced"`）。`--region` 永远是屏幕捕获。
+
+录制过程中：
+
+- **移动。** 屏幕来源下，捕获矩形每一帧都跟着窗口走；画布保持开始时的大小，只有原点在移动，所以窗口在 GIF 里待在原位。输出里的公式对开始时的位置有效，窗口移动过则多一个 `moved:true`。
+- **调整大小。** 保持开始时的画布大小（之后的帧会裁剪或补边），并只给一次警告 `rec_window_resized`。
+- **遮挡变化。** 别的窗口盖住或露出目标，绝不会改变来源。每次变化都记录在 `occlusion_events:[{t_ms, occluded}]`（每 250 毫秒检查一次；`t_ms` 从 GIF 开头算起），并给出警告 `rec_occlusion_changed`。
+
+目标被盖住*而且*会弹出菜单时用哪个来源：真正的菜单（置顶的工具窗口，比如 WinForms 的右键菜单）画在遮挡窗口之上，所以 `screen` 录像里看得到它们，重叠的地方也会看到遮挡窗口。普通的被拥有的弹出窗口则紧贴在其所有者之上、位于遮挡窗口之下，所以在屏幕录像里被遮住，在 `window` 录像里不存在。弹出窗口很重要时，请先把窗口露出来。
+
+#### 输出
 
 - **帧。** 按 `--fps` 采样；只有像素变化时才写入新帧，没变化的时段只是延长上一帧的延迟。静止的窗口只录出一帧，延迟很长。延迟以厘秒（GIF 的单位）为单位，取自连续的时间线；机器繁忙时实际帧数可能少于 `--fps`。
-- **计时。** 从捕获到第一帧时开始计时（捕获启动约需 0.3 秒），所以 `elapsed_ms` 比 `duration_ms` 大约多 0.7 秒。
+- **计时。** 从捕获到第一帧时开始计时（捕获启动约需 0.3 秒，屏幕来源会并行启动每个显示器的会话），所以 `elapsed_ms` 比 `duration_ms` 大约多 0.7 秒。
 - **`--until-settled`** 在第一帧之后的第一次变化时才开始计时。录制开始时窗口是静止的，不会导致它结束；如果始终没有变化，就录满 `--duration`。
-- **输出。** `path`、`frames`、`fps`、`duration_ms`（GIF 自身的长度）、`image`、`size_bytes`、`stopped`（`duration` 或 `settled`）、`elapsed_ms`，以及与 `shot` 相同的 `maps_to`、`scale`、`dpi_scale`、`monitor_dpi_scale`、`formula`，窗口还有 `window`、`formula_window`、`formula_client`、`popups`。它们把 GIF 像素（和静帧像素）换算成录制开始时的坐标。指定 `--keyframes N` 时，`keyframes` 列出 `{t_ms, path}`：第一帧、最后一帧，以及中间变化最大的帧（共 N 张，不同的帧不够时更少），按时间排序；`t_ms` 从 GIF 开头算起。
-- **警告。** `gif_large`（超过约 10 MB）、`window_resized_during_recording`（之后的帧会按第一帧的大小裁剪或补边），以及 `shot` 的那些警告。
-- **限制。** 弹出窗口只在录制开始时检测一次：之后才打开的菜单不会出现在窗口录像里（这种情况请录 `--region`）。公式里的窗口位置是开始时的位置。
+- **字段。** `path`、`frames`、`fps`、`duration_ms`（GIF 自身的长度）、`image`、`size_bytes`、`source`、`source_reason`、`stopped`（`duration` 或 `settled`）、`elapsed_ms`，以及与 `shot` 相同的 `maps_to`、`scale`、`dpi_scale`、`monitor_dpi_scale`、`formula`，窗口还有 `window`、`formula_window`、`formula_client`，另有 `occlusion_events`（窗口目标）和 `moved`（仅为 true 时出现）。公式把 GIF 像素（和静帧像素）换算成录制开始时的坐标；使用 `--pad` 时窗口偏移和客户区偏移是负数，因为画布从窗口外面开始。指定 `--keyframes N` 时，`keyframes` 列出 `{t_ms, path}`：第一帧、最后一帧，以及中间变化最大的帧（共 N 张，不同的帧不够时更少），按时间排序；`t_ms` 从 GIF 开头算起。
+- **警告。** `gif_large`（超过约 10 MB）、`rec_window_source_no_popups`、`rec_window_resized`、`rec_occlusion_changed`、`rec_pad_ignored`。
 
 ```
-> sight rec --hwnd 11736012 --duration 4000 --keyframes 3 --out demo.gif
-{"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\rec-20261124-161200-100.gif","frames":22,"fps":10,"duration_ms":4000,"image":{"w":642,"h":452},"size_bytes":597570,"maps_to":{"space":"screen_physical","x":207,"y":150,"w":642,"h":452},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 207 + px / 1.0; screen_y = 150 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 0 + px / 1.0; win_y = 0 + py / 1.0","formula_client":"client_x = -1 + px / 1.0; client_y = -31 + py / 1.0","stopped":"duration","elapsed_ms":4504,"popups":[],"keyframes":[{"t_ms":1,"path":"...\\rec-20261124-161200-100-key1.png"},{"t_ms":1500,"path":"...\\rec-20261124-161200-100-key2.png"},{"t_ms":2700,"path":"...\\rec-20261124-161200-100-key3.png"}]},"warnings":[]}
+> sight rec --hwnd 11736012 --pad 20 --duration 3000 --keyframes 2 --out demo.gif
+{"v":1,"ok":true,"data":{"path":"...\\demo.gif","frames":2,"fps":10,"duration_ms":3000,"image":{"w":682,"h":492},"size_bytes":63545,"maps_to":{"space":"screen_physical","x":187,"y":130,"w":682,"h":492},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 187 + px / 1.0; screen_y = 130 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = -20 + px / 1.0; win_y = -20 + py / 1.0","formula_client":"client_x = -21 + px / 1.0; client_y = -51 + py / 1.0","source":"screen","source_reason":"auto_not_occluded","occlusion_events":[],"stopped":"duration","elapsed_ms":3378,"keyframes":[{"t_ms":1,"path":"...\\demo-key1.png"},{"t_ms":800,"path":"...\\demo-key2.png"}]},"warnings":[]}
 ```
 
-在操作的同时放到后台运行（它启动约需 0.3 秒；第一次操作前先等约 0.5 秒）：
+在操作的同时放到后台运行（启动约需 0.3 秒，各显示器的会话并行启动；第一次操作前先等约 0.7 秒）：
 
 ```powershell
-$job = Start-Job { sight rec --hwnd 15603054 --duration 10000 --until-settled 500 --keyframes 3 --out demo.gif }
-Start-Sleep -Milliseconds 500                       # 0.3 s
-# ... act with your own tool ...
-$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json
+$job = Start-Job { sight rec --hwnd 123456 --duration 10000 --until-settled 500 --keyframes 3 --out C:\tmp\demo.gif }
+Start-Sleep -Milliseconds 700      # capture needs ~0.3 s per monitor session to start
+# ... act with your own tool (click, type) ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json   # data.path, data.keyframes[].path
 ```
 
 ### `stat`

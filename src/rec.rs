@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde_json::{Value, json};
 
 use crate::baseline;
 use crate::capture::{self, CropSpec, FrameCopy, Opts, Session, Source};
 use crate::error::SightError;
+use crate::occlusion;
 use crate::shot::{self, How, Region};
 use crate::win::{self, Rect};
 
@@ -26,6 +27,19 @@ use crate::win::{self, Rect};
 const LARGE_GIF_BYTES: u64 = 10 * 1024 * 1024;
 /// How long to wait for the first frame of every capture session.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often the window's occlusion is re-checked while recording.
+const OCCLUSION_POLL: Duration = Duration::from_millis(250);
+
+/// Which capture API records a window.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SourceArg {
+    /// Screen when nothing covers the window at the start, else window capture
+    Auto,
+    /// Screen (monitor) capture of the window's rect: shows menus and popups
+    Screen,
+    /// Window capture: only the window itself, even when covered
+    Window,
+}
 
 #[derive(Args)]
 pub struct RecArgs {
@@ -42,6 +56,17 @@ pub struct RecArgs {
     /// (--hwnd/--pid only)
     #[arg(long, value_parser = shot::parse_region)]
     pub crop: Option<Region>,
+    /// Capture source, chosen once at the start (--hwnd/--pid): auto uses screen
+    /// capture unless another window covers the target
+    #[arg(long, value_enum, default_value_t = SourceArg::Auto)]
+    pub source: SourceArg,
+    /// Extra px around the window in a screen recording, so dropdowns that stick
+    /// out of it are included (--hwnd/--pid only)
+    #[arg(long, default_value_t = 0)]
+    pub pad: u32,
+    /// Include the mouse cursor
+    #[arg(long)]
+    pub cursor: bool,
     /// Recording length (ms), counted from the first captured frame
     #[arg(long)]
     pub duration: u64,
@@ -67,8 +92,8 @@ pub struct RecArgs {
 /// One capture session and where its pixels land on the canvas.
 struct Part {
     session: Session,
-    /// Top-left on the canvas.
-    dest: (i64, i64),
+    /// Top-left on the canvas; `None` when each frame carries its own position.
+    dest: Option<(i64, i64)>,
     last: Option<FrameCopy>,
 }
 
@@ -235,6 +260,109 @@ fn default_path() -> Result<PathBuf, SightError> {
     Ok(dir.join(format!("rec-{}.gif", shot::timestamp())))
 }
 
+/// What a part is made of, before its session starts.
+struct PartSpec {
+    source: Source,
+    crop: CropSpec,
+    dest: Option<(i64, i64)>,
+}
+
+/// Start all sessions at once (each start takes about 0.3 s).
+fn start_parts(specs: Vec<PartSpec>, opts: &Opts) -> Result<Vec<Part>, SightError> {
+    let results: Vec<Result<Session, SightError>> = std::thread::scope(|s| {
+        let handles: Vec<_> = specs
+            .iter()
+            .map(|sp| s.spawn(move || Session::start(&sp.source, sp.crop.clone(), opts)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(SightError::Internal("capture thread panicked".into())))
+            })
+            .collect()
+    });
+    let mut parts = Vec::new();
+    let mut error = None;
+    for (sp, r) in specs.iter().zip(results) {
+        match r {
+            Ok(session) => parts.push(Part {
+                session,
+                dest: sp.dest,
+                last: None,
+            }),
+            Err(e) => {
+                error.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = error {
+        for p in parts {
+            p.session.stop();
+        }
+        return Err(e);
+    }
+    Ok(parts)
+}
+
+/// One monitor session per slice of a fixed screen `region`.
+fn region_specs(region: Rect) -> Result<Vec<PartSpec>, SightError> {
+    let (slices, _) = capture::region_parts(region)?;
+    Ok(slices
+        .iter()
+        .map(|s| PartSpec {
+            source: Source::Monitor(s.hmon),
+            crop: CropSpec::Rect(s.local),
+            dest: Some((
+                i64::from(s.inter.x - region.x),
+                i64::from(s.inter.y - region.y),
+            )),
+        })
+        .collect())
+}
+
+/// One monitor session per monitor, each following the window's frame.
+fn follow_specs(hwnd: u64, frame: Rect, offset: (i32, i32), size: (i32, i32)) -> Vec<PartSpec> {
+    win::monitors()
+        .iter()
+        .map(|m| PartSpec {
+            source: Source::Monitor(m.hmon),
+            crop: CropSpec::Follow {
+                hwnd,
+                offset,
+                size,
+                monitor: m.rect,
+                fallback: frame,
+            },
+            dest: None,
+        })
+        .collect()
+}
+
+/// Which capture API records the window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Src {
+    Screen,
+    Window,
+}
+
+impl Src {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Window => "window",
+        }
+    }
+}
+
+/// The region to watch for occluders: the frame plus `pad`, kept on the desktop.
+fn watch_region(frame: Rect, pad: i32) -> Rect {
+    let r = frame.expand(pad);
+    win::virtual_desktop()
+        .and_then(|d| r.intersect(&d))
+        .unwrap_or(r)
+}
+
 pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
     let start = Instant::now();
     let targets = [
@@ -254,6 +382,17 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
                 .into(),
         ));
     }
+    if args.region.is_some() && args.pad > 0 {
+        return Err(SightError::InvalidArgs(
+            "--pad works only with --hwnd/--pid; a --region already says exactly what to record"
+                .into(),
+        ));
+    }
+    if args.region.is_some() && args.source == SourceArg::Window {
+        return Err(SightError::InvalidArgs(
+            "--region is always a screen capture; --source window needs --hwnd/--pid".into(),
+        ));
+    }
     if args.duration == 0 || args.until_settled == Some(0) {
         return Err(SightError::InvalidArgs(
             "--duration and --until-settled must be greater than 0".into(),
@@ -263,37 +402,105 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
         return Err(SightError::InvalidArgs("--fps must be in 1..=30".into()));
     }
     let mut warnings = Vec::new();
+    let opts =
+        Opts::new(None, 1, false, start, start + FIRST_FRAME_TIMEOUT).with_cursor(args.cursor);
 
-    // Plan: which sessions, and what the canvas looks like.
-    let opts = Opts::new(None, 1, false, start, start + FIRST_FRAME_TIMEOUT);
-    let mut window_plan = None;
-    let (mut parts, region): (Vec<Part>, Option<Rect>) = if let Some(shot::Region(r)) = &args.region
+    // Plan: ONE source, chosen now and never switched. `win` is set for window targets.
+    struct Watch {
+        hwnd: u64,
+        frame: Rect,
+        pad: i32,
+    }
+    let pad = args.pad as i32;
+    let mut watch: Option<Watch> = None;
+    let mut plan = None;
+    let mut source = Src::Screen;
+    let mut reason = "forced";
+    let mut occluded0 = false;
+    let (specs, fixed_canvas): (Vec<PartSpec>, Option<Rect>) = if let Some(shot::Region(r)) =
+        &args.region
     {
-        (region_sessions(*r, &opts)?, Some(*r))
+        (region_specs(*r)?, Some(*r))
     } else {
         let hwnd = match (args.hwnd, args.pid) {
             (Some(h), _) => h,
             (None, Some(pid)) => shot::pick_pid_window(pid, &mut warnings)?.0,
             (None, None) => unreachable!("validated above"),
         };
-        let plan = shot::plan_window(hwnd, args.crop.as_ref().map(|c| c.0), &mut warnings)?;
-        let out = match &plan.how {
-            How::Region(r) => (region_sessions(*r, &opts)?, Some(*r)),
-            How::Frame(spec) => {
-                let s = Session::start(&Source::Window(hwnd), spec.clone(), &opts)?;
+        // Validates the window (minimized, protected, ...) and gives its frame.
+        let p0 = shot::plan_window(hwnd, None, false, &mut warnings)?;
+        let frame = p0.geo.frame;
+        occluded0 = !occlusion::occluders(hwnd, watch_region(frame, pad)).is_empty();
+        (source, reason) = match args.source {
+            SourceArg::Screen => (Src::Screen, "forced"),
+            SourceArg::Window => (Src::Window, "forced"),
+            SourceArg::Auto if occluded0 => {
+                warnings.push("rec_window_source_no_popups".into());
+                (Src::Window, "auto_occluded")
+            }
+            SourceArg::Auto => (Src::Screen, "auto_not_occluded"),
+        };
+        watch = Some(Watch { hwnd, frame, pad });
+        let out = match source {
+            Src::Window => {
+                if pad > 0 {
+                    warnings.push("rec_pad_ignored".into());
+                }
+                let p =
+                    shot::plan_window(hwnd, args.crop.as_ref().map(|c| c.0), false, &mut warnings)?;
+                let How::Frame(spec) = p.how else {
+                    unreachable!("popup fallback is off")
+                };
                 (
-                    vec![Part {
-                        session: s,
-                        dest: (0, 0),
-                        last: None,
+                    vec![PartSpec {
+                        source: Source::Window(hwnd),
+                        crop: spec,
+                        dest: Some((0, 0)),
                     }],
                     None,
                 )
             }
+            Src::Screen => {
+                let cap = match args.crop.as_ref().map(|c| c.0) {
+                    Some(c) => {
+                        if c.x < -pad
+                            || c.y < -pad
+                            || c.right() > frame.w + pad
+                            || c.bottom() > frame.h + pad
+                        {
+                            return Err(SightError::InvalidArgsHint {
+                                msg: format!(
+                                    "--crop {},{},{},{} lies outside the window frame plus --pad {pad}",
+                                    c.x, c.y, c.w, c.h
+                                ),
+                                hint: format!(
+                                    "the window frame is {}x{} px: crop x,y,w,h must satisfy x>={}, y>={}, x+w<={}, y+h<={}",
+                                    frame.w,
+                                    frame.h,
+                                    -pad,
+                                    -pad,
+                                    frame.w + pad,
+                                    frame.h + pad
+                                ),
+                            });
+                        }
+                        Rect {
+                            x: frame.x + c.x,
+                            y: frame.y + c.y,
+                            w: c.w,
+                            h: c.h,
+                        }
+                    }
+                    None => watch_region(frame, pad),
+                };
+                let offset = (cap.x - frame.x, cap.y - frame.y);
+                (follow_specs(hwnd, frame, offset, (cap.w, cap.h)), Some(cap))
+            }
         };
-        window_plan = Some(plan);
+        plan = Some(p0);
         out
     };
+    let mut parts = start_parts(specs, &opts)?;
 
     // Wait for every session's first frame.
     let first_deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
@@ -320,12 +527,11 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
     }
     let t0 = Instant::now();
 
-    // Canvas: the region, or the window's first frame.
-    let first_frames: Vec<FrameCopy> = parts.iter().filter_map(|p| p.session.frame()).collect();
-    let (canvas_w, canvas_h, maps_to) = match region {
+    // Canvas: a fixed rect (region, screen source), or the window's first frame.
+    let (canvas_w, canvas_h, maps_to) = match fixed_canvas {
         Some(r) => (r.w as u32, r.h as u32, r),
         None => {
-            let f = &first_frames[0];
+            let f = parts[0].session.frame().expect("first frame arrived above");
             let maps_to = Rect {
                 x: f.origin.0 + f.crop.x,
                 y: f.origin.1 + f.crop.y,
@@ -377,6 +583,10 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
     let mut last_img: Option<RgbaImage> = None;
     let mut last_change: Option<Instant> = None;
     let mut resized = false;
+    let mut moved = false;
+    let mut occluded = occluded0;
+    let mut events: Vec<Value> = Vec::new();
+    let mut next_occlusion_check = t0;
     let mut error: Option<SightError> = None;
     let mut stopped = "duration";
     let mut k = 0u32;
@@ -389,10 +599,27 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(t0);
         let finished = elapsed >= duration;
+        let t_ms = elapsed.as_millis() as u64;
 
         if let Some(e) = parts.iter().find_map(|p| p.session.error()) {
             error = Some(SightError::Internal(e));
             break;
+        }
+        // The window may move or resize, and other windows may come and go. None of
+        // that changes the source; it is only reported.
+        if let Some(w) = &watch {
+            let frame = win::frame_bounds(w.hwnd).unwrap_or(w.frame);
+            moved |= (frame.x, frame.y) != (w.frame.x, w.frame.y);
+            resized |= (frame.w, frame.h) != (w.frame.w, w.frame.h);
+            if now >= next_occlusion_check {
+                next_occlusion_check = now + OCCLUSION_POLL;
+                let now_occluded =
+                    !occlusion::occluders(w.hwnd, watch_region(frame, w.pad)).is_empty();
+                if now_occluded != occluded {
+                    occluded = now_occluded;
+                    events.push(json!({"t_ms": t_ms, "occluded": occluded}));
+                }
+            }
         }
         // Refresh parts whose pixels changed since the last tick.
         let mut dirty = last_img.is_none();
@@ -405,16 +632,16 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
         if dirty {
             for p in &parts {
                 if let Some(f) = &p.last {
-                    if region.is_none()
-                        && (f.crop.w as u32, f.crop.h as u32) != (canvas_w, canvas_h)
-                    {
-                        resized = true;
+                    let dest = p.dest.unwrap_or((
+                        i64::from(f.origin.0 + f.crop.x),
+                        i64::from(f.origin.1 + f.crop.y),
+                    ));
+                    if f.origin.0 != capture::OFF_CANVAS {
+                        paste(&mut canvas, f, dest);
                     }
-                    paste(&mut canvas, f, p.dest);
                 }
             }
             let img = baseline::resize(&canvas, ow, oh);
-            let t_ms = elapsed.as_millis() as u64;
             let score = last_img.as_ref().map_or(0, |l| differing(l, &img));
             if last_img.is_none() || score > 0 {
                 if last_img.is_some() {
@@ -455,7 +682,10 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
     let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
     if resized {
-        warnings.push("window_resized_during_recording".into());
+        warnings.push("rec_window_resized".into());
+    }
+    if !events.is_empty() {
+        warnings.push("rec_occlusion_changed".into());
     }
     if size_bytes > LARGE_GIF_BYTES {
         warnings.push("gif_large".into());
@@ -472,11 +702,7 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
         "maps_to": {"space": "screen_physical", "x": maps_to.x, "y": maps_to.y, "w": maps_to.w, "h": maps_to.h},
         "scale": scale,
     });
-    let (geo, popups) = match &window_plan {
-        Some(p) => (Some(&p.geo), Some(Value::Array(p.popups.clone()))),
-        None => (None, None),
-    };
-    if let Some(p) = &window_plan {
+    if let Some(p) = &plan {
         data["dpi_scale"] = json!(p.dpi_scale);
         data["monitor_dpi_scale"] = json!(p.monitor_dpi_scale);
     } else {
@@ -487,12 +713,25 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
         data["dpi_scale"] = json!(dpi);
         data["monitor_dpi_scale"] = json!(dpi);
     }
-    shot::add_formulas(&mut data, maps_to, &sc, geo);
+    shot::add_formulas(&mut data, maps_to, &sc, plan.as_ref().map(|p| &p.geo));
+    data["source"] = json!(if args.region.is_some() {
+        "screen"
+    } else {
+        source.name()
+    });
+    data["source_reason"] = json!(if args.region.is_some() {
+        "forced"
+    } else {
+        reason
+    });
+    if moved {
+        data["moved"] = json!(true);
+    }
+    if watch.is_some() {
+        data["occlusion_events"] = Value::Array(events);
+    }
     data["stopped"] = json!(stopped);
     data["elapsed_ms"] = json!(start.elapsed().as_millis() as u64);
-    if let Some(p) = popups {
-        data["popups"] = p;
-    }
 
     if args.keyframes > 0 {
         let stem = path.with_extension("");
@@ -505,32 +744,6 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
         data["keyframes"] = Value::Array(list);
     }
     Ok((data, warnings))
-}
-
-/// Start one monitor session per slice of `region`.
-fn region_sessions(region: Rect, opts: &Opts) -> Result<Vec<Part>, SightError> {
-    let (slices, covered) = capture::region_parts(region)?;
-    let mut parts = Vec::new();
-    for s in &slices {
-        match Session::start(&Source::Monitor(s.hmon), CropSpec::Rect(s.local), opts) {
-            Ok(session) => parts.push(Part {
-                session,
-                dest: (
-                    i64::from(s.inter.x - region.x),
-                    i64::from(s.inter.y - region.y),
-                ),
-                last: None,
-            }),
-            Err(e) => {
-                for p in parts {
-                    p.session.stop();
-                }
-                return Err(e);
-            }
-        }
-    }
-    let _ = covered;
-    Ok(parts)
 }
 
 #[cfg(test)]

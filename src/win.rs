@@ -25,6 +25,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, WS_POPUP,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_EXSTYLE, GetLayeredWindowAttributes, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
+    WS_EX_LAYERED,
+};
 use windows::core::{BOOL, PWSTR};
 
 /// Make the whole process Per-Monitor V2 DPI aware so every coordinate we see
@@ -73,6 +77,15 @@ impl Rect {
             w: r - l,
             h: b - t,
         })
+    }
+    /// Grow by `n` px on every side.
+    pub fn expand(&self, n: i32) -> Rect {
+        Rect {
+            x: self.x - n,
+            y: self.y - n,
+            w: self.w + 2 * n,
+            h: self.h + 2 * n,
+        }
     }
     pub fn union(&self, o: &Rect) -> Rect {
         let (l, t) = (self.x.min(o.x), self.y.min(o.y));
@@ -228,6 +241,59 @@ pub fn window_dpi_scale(hwnd: u64) -> f64 {
     } else {
         round2(f64::from(dpi) / 96.0)
     }
+}
+
+/// Bounding box of all monitors (the virtual desktop).
+pub fn virtual_desktop() -> Option<Rect> {
+    monitors().iter().map(|m| m.rect).reduce(|a, b| a.union(&b))
+}
+
+/// Every top-level window handle, topmost first.
+pub fn top_level_hwnds() -> Vec<u64> {
+    let mut hs: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(window_cb), LPARAM(&mut hs as *mut Vec<HWND> as isize));
+    }
+    hs.into_iter().map(hwnd_to_u64).collect()
+}
+
+pub fn is_visible(hwnd: u64) -> bool {
+    unsafe { IsWindowVisible(hwnd_from_u64(hwnd)).as_bool() }
+}
+
+pub fn is_minimized(hwnd: u64) -> bool {
+    unsafe { IsIconic(hwnd_from_u64(hwnd)).as_bool() }
+}
+
+pub fn is_cloaked_hwnd(hwnd: u64) -> bool {
+    is_cloaked(hwnd_from_u64(hwnd))
+}
+
+pub fn class_name(hwnd: u64) -> String {
+    class_of(hwnd_from_u64(hwnd))
+}
+
+pub fn owner(hwnd: u64) -> u64 {
+    owner_of(hwnd_from_u64(hwnd))
+}
+
+pub fn pid_of(hwnd: u64) -> u32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd_from_u64(hwnd), Some(&mut pid)) };
+    pid
+}
+
+/// True for a layered window whose constant alpha is 0: it draws nothing.
+pub fn is_fully_transparent(hwnd: u64) -> bool {
+    let h = hwnd_from_u64(hwnd);
+    let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) } as u32;
+    if ex & WS_EX_LAYERED.0 == 0 {
+        return false;
+    }
+    let (mut alpha, mut flags) = (255u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+    unsafe { GetLayeredWindowAttributes(h, None, Some(&mut alpha), Some(&mut flags)) }.is_ok()
+        && flags.0 & LWA_ALPHA.0 != 0
+        && alpha == 0
 }
 
 fn is_cloaked(hwnd: HWND) -> bool {

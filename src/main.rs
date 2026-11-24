@@ -2,6 +2,7 @@ mod baseline;
 mod capture;
 mod error;
 mod list;
+mod occlusion;
 mod output;
 mod rec;
 mod shot;

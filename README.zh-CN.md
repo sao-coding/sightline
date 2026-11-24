@@ -147,12 +147,14 @@ sight shot --hwnd 15603054 --settle 300   # 等画面稳定后截图
 
 ```powershell
 $job = Start-Job { sight rec --hwnd 15603054 --duration 10000 --until-settled 500 --keyframes 3 --out demo.gif }
-Start-Sleep -Milliseconds 500                       # 0.3 s
+Start-Sleep -Milliseconds 700                       # capture needs ~0.3 s to start
 # ... act with your own tool ...
 $rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json
 ```
 
 返回结果包含 `frames`、`fps`、`duration_ms`、`size_bytes`，以及与 `shot` 相同的坐标公式。相同的帧会被合并（静止的窗口只有一帧很长的画面），`--keyframes 3` 还会把变化最大的几个时刻存成 PNG 静帧，智能体不用解码 GIF 就能检查录像。默认 `--fps 10`（最大 30）、`--max-edge 800`。
+
+`rec` 在启动时选定一个捕获来源，之后绝不切换：`--source auto`（默认）对窗口的矩形做屏幕捕获，菜单、提示框和弹出窗口都会录到；只有当别的窗口盖住目标时才改用窗口捕获（`source`、`source_reason` 和警告 `rec_window_source_no_popups` 会告诉你用了哪个）。`--pad 40` 还会多录窗口四周 40 像素，让伸出窗口的下拉列表也能录进去。窗口移动时捕获区域会跟着走；录制中途盖住它的窗口会列在 `occlusion_events` 里。
 
 ### 坐标：选与你的输入工具一致的原点
 

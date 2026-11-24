@@ -166,7 +166,7 @@ done, so run it in the background while you act:
 
 ```powershell
 $job = Start-Job { sight rec --hwnd 123456 --duration 10000 --until-settled 500 --keyframes 3 --out C:\tmp\demo.gif }
-Start-Sleep -Milliseconds 500      # capture needs ~0.3 s to start
+Start-Sleep -Milliseconds 700                       # capture needs ~0.3 s to start
 # ... act with your own tool (click, type) ...
 $rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json   # data.path, data.keyframes[].path
 ```
@@ -175,6 +175,13 @@ The result has `frames`, `fps`, `duration_ms`, `size_bytes` and the same coordin
 `shot`. Identical frames are merged (a static window is one long frame), and `--keyframes 3` also
 saves PNG stills of the biggest changes so an agent can check the recording without decoding the
 GIF. Defaults: `--fps 10` (max 30), `--max-edge 800`.
+
+`rec` picks one capture source when it starts and never switches: `--source auto` (default) uses
+screen capture of the window's rect, which includes menus, tooltips and popups, unless another window
+covers the target, and then window capture (`source`, `source_reason` and the warning
+`rec_window_source_no_popups` say which). `--pad 40` also records 40 px around the window so a
+dropdown that sticks out is included. The capture follows a window that moves; windows covering it
+mid-recording are listed in `occlusion_events`.
 
 ### Coordinates: pick the origin your input tool uses
 

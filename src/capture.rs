@@ -36,12 +36,70 @@ pub enum CropSpec {
         window: Rect,
         sub: Option<Rect>,
     },
+    /// Monitor capture of a screen rect that follows a window: the rect is the
+    /// window's DWM frame (read again for every frame) moved by `offset`, with a
+    /// fixed `size`, clipped to this monitor (`monitor`, screen coordinates).
+    /// Frames report their `origin` as the canvas position of the monitor
+    /// texture's (0,0), where the canvas is the followed rect.
+    Follow {
+        hwnd: u64,
+        offset: (i32, i32),
+        size: (i32, i32),
+        monitor: Rect,
+        /// Used when the window's frame cannot be read.
+        fallback: Rect,
+    },
+}
+
+/// `origin` of a frame that contributes nothing to the canvas.
+pub const OFF_CANVAS: i32 = -1_000_000;
+
+/// For `CropSpec::Follow`: the part of `canvas` (screen rect) on `monitor` as a
+/// monitor-local crop, plus the canvas position of the monitor's (0,0).
+fn follow_crop(canvas: Rect, monitor: Rect) -> (Rect, (i32, i32)) {
+    match canvas.intersect(&monitor) {
+        Some(i) => (
+            Rect {
+                x: i.x - monitor.x,
+                y: i.y - monitor.y,
+                w: i.w,
+                h: i.h,
+            },
+            (monitor.x - canvas.x, monitor.y - canvas.y),
+        ),
+        // Nothing of the canvas is on this monitor: copy a single pixel.
+        None => (
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            (OFF_CANVAS, OFF_CANVAS),
+        ),
+    }
 }
 
 impl CropSpec {
     fn resolve(&self, fw: i32, fh: i32) -> (Rect, (i32, i32)) {
         match self {
             Self::Rect(r) => (*r, (0, 0)),
+            Self::Follow {
+                hwnd,
+                offset,
+                size,
+                monitor,
+                fallback,
+            } => {
+                let frame = win::frame_bounds(*hwnd).unwrap_or(*fallback);
+                let canvas = Rect {
+                    x: frame.x + offset.0,
+                    y: frame.y + offset.1,
+                    w: size.0,
+                    h: size.1,
+                };
+                follow_crop(canvas, *monitor)
+            }
             Self::WindowFrame { frame, window, sub } => {
                 let (base, origin) =
                     if (fw, fh) == (window.w, window.h) && (fw, fh) != (frame.w, frame.h) {
@@ -97,6 +155,8 @@ pub struct Opts {
     /// Compare the first frame against this earlier image instead of using it
     /// as the baseline (implies `expect_change`).
     pub baseline: Option<Arc<Baseline>>,
+    /// Include the mouse cursor in the capture.
+    pub cursor: bool,
     changed: Arc<OnceLock<Instant>>,
 }
 
@@ -115,7 +175,15 @@ impl Opts {
             start,
             deadline,
             baseline: None,
+            cursor: false,
             changed: Arc::default(),
+        }
+    }
+
+    pub fn with_cursor(&self, cursor: bool) -> Self {
+        Self {
+            cursor,
+            ..self.clone()
         }
     }
 
@@ -269,10 +337,15 @@ fn internal(e: impl std::fmt::Display) -> SightError {
     SightError::Internal(format!("capture failed: {e}"))
 }
 
-fn cursor_setting() -> CursorCaptureSettings {
+fn cursor_setting(show: bool) -> CursorCaptureSettings {
     if GraphicsCaptureApi::is_cursor_settings_supported().unwrap_or(false) {
-        CursorCaptureSettings::WithoutCursor
+        if show {
+            CursorCaptureSettings::WithCursor
+        } else {
+            CursorCaptureSettings::WithoutCursor
+        }
     } else {
+        // Cannot be controlled: the system default applies.
         CursorCaptureSettings::Default
     }
 }
@@ -315,7 +388,7 @@ impl Session {
             ($item:expr) => {
                 Handler::start_free_threaded(Settings::new(
                     $item,
-                    cursor_setting(),
+                    cursor_setting(opts.cursor),
                     border_setting(),
                     SecondaryWindowSettings::Default,
                     MinimumUpdateIntervalSettings::Default,
@@ -553,6 +626,33 @@ mod tests {
         b[4] = 2;
         assert_eq!(differing_px(&a, &b), 2);
         assert_eq!(differing_px(&a, &b[..4]), usize::MAX);
+    }
+
+    #[test]
+    fn follow_crop_clips_the_canvas_to_each_monitor() {
+        let mon = |x| Rect {
+            x,
+            y: 0,
+            w: 100,
+            h: 100,
+        };
+        // Canvas 60..140 x 10..50 straddles two side-by-side monitors.
+        let canvas = Rect {
+            x: 60,
+            y: 10,
+            w: 80,
+            h: 40,
+        };
+        let (a, oa) = follow_crop(canvas, mon(0));
+        assert_eq!((a.x, a.y, a.w, a.h), (60, 10, 40, 40));
+        assert_eq!(oa, (-60, -10));
+        let (b, ob) = follow_crop(canvas, mon(100));
+        assert_eq!((b.x, b.y, b.w, b.h), (0, 10, 40, 40));
+        assert_eq!(ob, (40, -10));
+        // Canvas pixel = origin + crop position + offset within the crop.
+        assert_eq!((ob.0 + b.x, ob.1 + b.y), (40, 0));
+        let (c, oc) = follow_crop(canvas, mon(500));
+        assert_eq!((c.w, c.h, oc), (1, 1, (OFF_CANVAS, OFF_CANVAS)));
     }
 
     #[test]

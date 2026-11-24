@@ -138,7 +138,7 @@ pub struct Captured {
 
 /// Window classes that are popups by nature (menus, tooltips, dropdown lists,
 /// XAML flyouts) even when they are not owned by the target.
-const POPUP_CLASSES: &[&str] = &[
+pub const POPUP_CLASSES: &[&str] = &[
     "#32768",                                     // Win32 menu
     "tooltips_class32",                           // Win32 tooltip
     "ComboLBox",                                  // combo box dropdown list
@@ -163,7 +163,7 @@ fn popup_reason(w: &WinInfo, target: u64, all: &[WinInfo]) -> Option<&'static st
 
 /// Validate a window-relative `--crop` against the DWM frame and return it as
 /// a screen rect.
-fn crop_to_screen(crop: Rect, frame: Rect) -> Result<Rect, SightError> {
+pub fn crop_to_screen(crop: Rect, frame: Rect) -> Result<Rect, SightError> {
     if crop.x < 0 || crop.y < 0 || crop.right() > frame.w || crop.bottom() > frame.h {
         return Err(SightError::InvalidArgsHint {
             msg: format!(
@@ -239,6 +239,7 @@ pub struct WinPlan {
 pub fn plan_window(
     hwnd: u64,
     crop: Option<Rect>,
+    popup_fallback: bool,
     warnings: &mut Vec<String>,
 ) -> Result<WinPlan, SightError> {
     let all = win::enum_windows();
@@ -287,6 +288,7 @@ pub fn plan_window(
                 && w.rect.intersect(&visible).is_some()
         })
         .filter_map(|w| popup_reason(w, hwnd, &all).map(|why| (w, why)))
+        .filter(|_| popup_fallback)
         .collect();
     let popup_json: Vec<Value> = popups
         .iter()
@@ -327,7 +329,7 @@ fn capture_window(
     opts: &Opts,
     warnings: &mut Vec<String>,
 ) -> Result<Captured, SightError> {
-    let plan = plan_window(hwnd, crop, warnings)?;
+    let plan = plan_window(hwnd, crop, true, warnings)?;
     let target = TargetId::Window { hwnd };
     let (opts, size_change) = with_baseline(opts, baseline, target, crop, plan.source, warnings)?;
     let opts = &opts;
