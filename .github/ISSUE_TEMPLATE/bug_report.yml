@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work the way it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English or Chinese are both fine. For a security problem, use the private report instead (see the links on the previous page).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Command and output
+      description: The exact `sight` command and its JSON output. Remove anything private (window titles can be private).
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `sight --version`.
+      placeholder: sight 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and displays
+      description: Windows 10 or 11, and the monitors and DPI scales from `sight doctor`.
+      placeholder: Windows 11 24H2, two monitors at 100% and 150%
+  - type: input
+    id: target
+    attributes:
+      label: App you were capturing or measuring
+      placeholder: Notepad, Chrome, an Electron app, a game, ...

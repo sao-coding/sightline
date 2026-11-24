@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest something sightline should do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English or Chinese are both fine. sightline only observes and measures: it never clicks, types or moves the mouse, and it does no OCR or image analysis.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The situation, not the solution. What does the agent need to see or measure?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like sightline to do
+      description: A command, a flag or an output field, if you have one in mind.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today
+      description: Scripts or workarounds you use now, and what is wrong with them.
