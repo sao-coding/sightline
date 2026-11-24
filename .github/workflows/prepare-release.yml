@@ -1,11 +1,11 @@
 name: Prepare release
 
 # Opens (or updates) the release PR from the `release` branch to main.
-# Runs when changesets land on main, or manually. Never pushes to main.
+# Runs on every push to main, or manually; it does nothing when no changesets are pending
+# (also after the release PR itself is merged, which deletes them). Never pushes to main.
 on:
   push:
     branches: [main]
-    paths: [".changeset/**"]
   workflow_dispatch:
 
 permissions:
