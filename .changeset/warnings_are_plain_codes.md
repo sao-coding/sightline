@@ -1,5 +1,5 @@
 ---
-default: patch
+default: major
 ---
 
 #### Warnings are plain code strings; details moved to `data`
