@@ -11,7 +11,7 @@ use image::{DynamicImage, RgbaImage};
 use serde_json::{Value, json};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
-use crate::capture::{self, CropSpec, Source};
+use crate::capture::{self, CropSpec, Opts, Source};
 use crate::error::SightError;
 use crate::win::{self, Rect, WinInfo};
 
@@ -36,8 +36,9 @@ fn parse_region(s: &str) -> Result<Region, String> {
     }))
 }
 
+/// Target and waiting options shared by `shot` and `wait`.
 #[derive(Args)]
-pub struct ShotArgs {
+pub struct CaptureArgs {
     /// Capture the largest visible window of this process
     #[arg(long)]
     pub pid: Option<u32>,
@@ -47,22 +48,43 @@ pub struct ShotArgs {
     /// Screen region x,y,w,h in physical pixels (screen capture, popups included)
     #[arg(long, value_parser = parse_region)]
     pub region: Option<Region>,
+    /// Crop x,y,w,h in physical px, relative to the window's DWM frame top-left
+    /// (--hwnd/--pid only); applied before --scale and --max-edge
+    #[arg(long, value_parser = parse_region)]
+    pub crop: Option<Region>,
+    /// Wait until the image has not changed for this many ms (up to --timeout)
+    #[arg(long)]
+    pub settle: Option<u64>,
+    /// Overall timeout (ms), shared by the change and settle phases
+    #[arg(long, default_value_t = 5000)]
+    pub timeout: u64,
+    /// Pixels that must differ for the image to count as changed (default 16
+    /// with --expect-change/--change, else 1 = exact); ignores caret blink etc.
+    #[arg(long)]
+    pub min_change_px: Option<u32>,
+}
+
+#[derive(Args)]
+pub struct ShotArgs {
+    #[command(flatten)]
+    pub cap: CaptureArgs,
+    /// Take the first frame as a baseline and wait until pixels differ from it
+    /// (then apply --settle). Use right after an external click or keypress
+    #[arg(long)]
+    pub expect_change: bool,
     /// Resize factor (nearest neighbour when > 1); > 1 writes PNG
     #[arg(long, default_value_t = 1.0)]
     pub scale: f32,
     /// Downscale so the long edge is at most this many pixels (0 = no limit)
     #[arg(long, default_value_t = 1568)]
     pub max_edge: u32,
-    /// Wait until the image has not changed for this many ms (up to --timeout)
-    #[arg(long)]
-    pub settle: Option<u64>,
-    /// Overall capture timeout (ms)
-    #[arg(long, default_value_t = 5000)]
-    pub timeout: u64,
     /// Output path (.png / .jpg pick the format); default: temp dir
     #[arg(long)]
     pub out: Option<PathBuf>,
 }
+
+/// Default for `--min-change-px` when waiting for a change.
+const DEFAULT_MIN_CHANGE_PX: u32 = 16;
 
 /// A failure that may still have produced an image (settle timeout).
 pub struct ShotFail {
@@ -81,14 +103,26 @@ impl From<SightError> for Box<ShotFail> {
     }
 }
 
-struct Captured {
-    img: RgbaImage,
-    maps_to: Rect,
-    dpi_scale: f64,
-    monitor_dpi_scale: f64,
-    settled: bool,
+/// Window geometry in screen physical px (window sources only).
+struct WindowGeo {
+    frame: Rect,
+    client: Option<Rect>,
+}
+
+pub struct Captured {
+    pub img: RgbaImage,
+    pub maps_to: Rect,
+    pub dpi_scale: f64,
+    pub monitor_dpi_scale: f64,
+    /// Waiting finished (change seen if required, quiet for --settle) in time.
+    pub settled: bool,
+    /// A frame differing from the baseline was seen.
+    pub changed: bool,
+    /// Ms from the start of the command to the first such frame.
+    pub change_ms: Option<u64>,
     /// Popups that forced the screen-capture fallback (window sources only).
     popups: Vec<Value>,
+    window: Option<WindowGeo>,
 }
 
 /// Window classes that are popups by nature (menus, tooltips, dropdown lists,
@@ -116,10 +150,33 @@ fn popup_reason(w: &WinInfo, target: u64, all: &[WinInfo]) -> Option<&'static st
     POPUP_CLASSES.contains(&w.class.as_str()).then_some("class")
 }
 
+/// Validate a window-relative `--crop` against the DWM frame and return it as
+/// a screen rect.
+fn crop_to_screen(crop: Rect, frame: Rect) -> Result<Rect, SightError> {
+    if crop.x < 0 || crop.y < 0 || crop.right() > frame.w || crop.bottom() > frame.h {
+        return Err(SightError::InvalidArgsHint {
+            msg: format!(
+                "--crop {},{},{},{} lies outside the window frame",
+                crop.x, crop.y, crop.w, crop.h
+            ),
+            hint: format!(
+                "the window frame is {}x{} px: crop x,y,w,h must satisfy x>=0, y>=0, x+w<={}, y+h<={}",
+                frame.w, frame.h, frame.w, frame.h
+            ),
+        });
+    }
+    Ok(Rect {
+        x: frame.x + crop.x,
+        y: frame.y + crop.y,
+        w: crop.w,
+        h: crop.h,
+    })
+}
+
 fn capture_window(
     hwnd: u64,
-    settle: Option<Duration>,
-    deadline: Instant,
+    crop: Option<Rect>,
+    opts: &Opts,
     warnings: &mut Vec<String>,
 ) -> Result<Captured, SightError> {
     let all = win::enum_windows();
@@ -141,8 +198,19 @@ fn capture_window(
         )));
     }
 
-    // Visible same-process WS_POPUP windows overlapping this one (menus,
-    // dropdowns, tooltips) are not part of a window capture.
+    let crop_screen = crop.map(|c| crop_to_screen(c, frame)).transpose()?;
+    let geo = WindowGeo {
+        frame,
+        client: win::client_rect_screen(hwnd),
+    };
+    if geo.client.is_none() {
+        warnings.push("client_rect_unavailable".into());
+    }
+    // What the image shows: the whole frame, or just the crop.
+    let visible = crop_screen.unwrap_or(frame);
+
+    // Visible same-process WS_POPUP windows overlapping what we capture
+    // (menus, dropdowns, tooltips) are not part of a window capture.
     let popups: Vec<(&WinInfo, &str)> = all
         .iter()
         .filter(|w| {
@@ -154,7 +222,7 @@ fn capture_window(
                 && !w.minimized
                 && w.z < info.z
                 && !w.rect.is_empty()
-                && w.rect.intersect(&frame).is_some()
+                && w.rect.intersect(&visible).is_some()
         })
         .filter_map(|w| popup_reason(w, hwnd, &all).map(|why| (w, why)))
         .collect();
@@ -163,21 +231,31 @@ fn capture_window(
         .map(|(w, why)| json!({"hwnd": w.hwnd, "class": w.class, "via": why}))
         .collect();
     if !popups.is_empty() {
-        let union = popups.iter().fold(frame, |u, (p, _)| u.union(&p.rect));
-        let (img, settled) = capture::grab_region(union, settle, deadline, warnings)?;
+        // With --crop the screen region is exactly the translated crop rect, so
+        // the crop keeps meaning the same window-relative area.
+        let region =
+            crop_screen.unwrap_or_else(|| popups.iter().fold(frame, |u, (p, _)| u.union(&p.rect)));
+        let (img, settled) = capture::grab_region(region, opts, warnings)?;
         warnings.push("popups_included_via_screen_capture".into());
         return Ok(Captured {
             img,
-            maps_to: union,
+            maps_to: region,
             dpi_scale: info.dpi_scale,
             monitor_dpi_scale: info.monitor_dpi_scale,
             settled,
+            changed: false,
+            change_ms: None,
             popups: popup_json,
+            window: Some(geo),
         });
     }
 
-    let spec = CropSpec::WindowFrame { frame, window: wr };
-    let g = capture::grab(&Source::Window(hwnd), spec, settle, deadline)?;
+    let spec = CropSpec::WindowFrame {
+        frame,
+        window: wr,
+        sub: crop,
+    };
+    let g = capture::grab(&Source::Window(hwnd), spec, opts)?;
     let maps_to = Rect {
         x: g.origin.0 + g.crop.x,
         y: g.origin.1 + g.crop.y,
@@ -190,7 +268,10 @@ fn capture_window(
         dpi_scale: info.dpi_scale,
         monitor_dpi_scale: info.monitor_dpi_scale,
         settled: g.settled,
+        changed: false,
+        change_ms: None,
         popups: popup_json,
+        window: Some(geo),
     })
 }
 
@@ -298,8 +379,14 @@ fn save(img: RgbaImage, path: &Path, fmt: Fmt) -> Result<(), SightError> {
     }
 }
 
-pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
-    let start = Instant::now();
+/// Validate the shared target/wait flags, then capture (waiting for a change
+/// and/or for the image to settle). Shared by `shot` and `wait`.
+pub fn acquire(
+    args: &CaptureArgs,
+    expect_change: bool,
+    start: Instant,
+    warnings: &mut Vec<String>,
+) -> Result<Captured, SightError> {
     let targets = [
         args.pid.is_some(),
         args.hwnd.is_some(),
@@ -308,18 +395,35 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
     if targets.iter().filter(|t| **t).count() != 1 {
         return Err(SightError::InvalidArgs(
             "specify exactly one of --hwnd, --pid, --region".into(),
-        )
-        .into());
+        ));
     }
-    if !args.scale.is_finite() || args.scale <= 0.0 || args.scale > 16.0 {
-        return Err(SightError::InvalidArgs("--scale must be in (0, 16]".into()).into());
+    if args.region.is_some() && args.crop.is_some() {
+        return Err(SightError::InvalidArgs(
+            "--crop is window-relative and works only with --hwnd/--pid; \
+             with --region, pass the sub-rectangle as the region itself"
+                .into(),
+        ));
     }
-    let settle = args.settle.map(Duration::from_millis);
-    let deadline = start + Duration::from_millis(args.timeout);
-    let mut warnings = Vec::new();
+    if args.min_change_px == Some(0) {
+        return Err(SightError::InvalidArgs(
+            "--min-change-px must be at least 1".into(),
+        ));
+    }
+    let min_px = args.min_change_px.unwrap_or(if expect_change {
+        DEFAULT_MIN_CHANGE_PX
+    } else {
+        1
+    });
+    let opts = Opts::new(
+        args.settle.map(Duration::from_millis),
+        min_px as usize,
+        expect_change,
+        start,
+        start + Duration::from_millis(args.timeout),
+    );
 
-    let cap = if let Some(Region(r)) = &args.region {
-        let (img, settled) = capture::grab_region(*r, settle, deadline, &mut warnings)?;
+    let mut cap = if let Some(Region(r)) = &args.region {
+        let (img, settled) = capture::grab_region(*r, &opts, warnings)?;
         if win::spans_mixed_dpi(r) {
             warnings.push("region_spans_mixed_dpi".into());
         }
@@ -331,20 +435,35 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
             dpi_scale: dpi,
             monitor_dpi_scale: dpi,
             settled,
+            changed: false,
+            change_ms: None,
             popups: Vec::new(),
+            window: None,
         }
     } else {
         let hwnd = match (args.hwnd, args.pid) {
             (Some(h), _) => h,
-            (None, Some(pid)) => pick_pid_window(pid, &mut warnings)?,
+            (None, Some(pid)) => pick_pid_window(pid, warnings)?,
             (None, None) => unreachable!("validated above"),
         };
-        capture_window(hwnd, settle, deadline, &mut warnings)?
+        capture_window(hwnd, args.crop.as_ref().map(|c| c.0), &opts, warnings)?
     };
+    cap.change_ms = opts.change_ms();
+    cap.changed = cap.change_ms.is_some();
 
     if (cap.dpi_scale - cap.monitor_dpi_scale).abs() > f64::EPSILON {
         warnings.push("window_dpi_unaware_or_virtualized".into());
     }
+    Ok(cap)
+}
+
+pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
+    let start = Instant::now();
+    if !args.scale.is_finite() || args.scale <= 0.0 || args.scale > 16.0 {
+        return Err(SightError::InvalidArgs("--scale must be in (0, 16]".into()).into());
+    }
+    let mut warnings = Vec::new();
+    let cap = acquire(&args.cap, args.expect_change, start, &mut warnings)?;
 
     // Scale: --scale first, then clamp the long edge to --max-edge. Both are
     // folded into one resize so the reported scale is the true px-per-screen-px.
@@ -385,24 +504,58 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
         "scale": reported,
         "dpi_scale": cap.dpi_scale,
         "monitor_dpi_scale": cap.monitor_dpi_scale,
-        "formula": format!("screen_x = {} + px / {sc}; screen_y = {} + py / {sc}", m.x, m.y),
-        "settled": cap.settled,
-        "elapsed_ms": start.elapsed().as_millis() as u64,
+        "formula": formula("screen", m.x, m.y, &sc),
     });
-    if args.region.is_none() {
+    if let Some(g) = &cap.window {
+        // Same image px -> other origins: the frame's and the client area's.
+        data["window"] = window_json(g);
+        data["formula_window"] = json!(formula("win", m.x - g.frame.x, m.y - g.frame.y, &sc));
+        if let Some(c) = &g.client {
+            data["formula_client"] = json!(formula("client", m.x - c.x, m.y - c.y, &sc));
+        }
+    }
+    data["settled"] = json!(cap.settled);
+    data["changed"] = json!(cap.changed);
+    data["change_ms"] = json!(cap.change_ms);
+    data["elapsed_ms"] = json!(start.elapsed().as_millis() as u64);
+    if args.cap.region.is_none() {
         data["popups"] = Value::Array(cap.popups);
     }
     if cap.settled {
         Ok((data, warnings))
     } else {
         Err(Box::new(ShotFail {
-            err: SightError::Timeout(format!(
-                "image did not settle within --timeout {}ms (saved the latest frame anyway)",
-                args.timeout
+            err: SightError::Timeout(timeout_message(
+                args.expect_change,
+                cap.changed,
+                args.cap.timeout,
+                "saved the latest frame anyway",
             )),
             data: Some(data),
             warnings,
         }))
+    }
+}
+
+/// `{prefix}_x = {ox} + px / {sc}; {prefix}_y = {oy} + py / {sc}`
+fn formula(prefix: &str, ox: i32, oy: i32, sc: &str) -> String {
+    format!("{prefix}_x = {ox} + px / {sc}; {prefix}_y = {oy} + py / {sc}")
+}
+
+fn window_json(g: &WindowGeo) -> Value {
+    let mut v = json!({"frame": g.frame});
+    if let Some(c) = &g.client {
+        v["client"] = json!(c);
+        v["client_offset"] = json!({"x": c.x - g.frame.x, "y": c.y - g.frame.y});
+    }
+    v
+}
+
+pub fn timeout_message(expect_change: bool, changed: bool, timeout: u64, tail: &str) -> String {
+    if expect_change && !changed {
+        format!("no change detected within --timeout {timeout}ms ({tail})")
+    } else {
+        format!("image did not settle within --timeout {timeout}ms ({tail})")
     }
 }
 
@@ -476,5 +629,53 @@ mod tests {
         assert_eq!(popup_reason(&all[2], 1, &all), Some("owner"));
         assert_eq!(popup_reason(&all[3], 1, &all), Some("class"));
         assert_eq!(popup_reason(&all[4], 1, &all), None);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    const FRAME: Rect = Rect {
+        x: 207,
+        y: 150,
+        w: 642,
+        h: 452,
+    };
+
+    #[test]
+    fn crop_is_translated_to_screen_and_validated() {
+        let c = |x, y, w, h| Rect { x, y, w, h };
+        assert_eq!(
+            crop_to_screen(c(100, 120, 300, 200), FRAME).unwrap(),
+            c(307, 270, 300, 200)
+        );
+        assert!(crop_to_screen(c(0, 0, 642, 452), FRAME).is_ok());
+        for bad in [c(-1, 0, 10, 10), c(0, 0, 643, 10), c(600, 400, 100, 100)] {
+            match crop_to_screen(bad, FRAME) {
+                Err(SightError::InvalidArgsHint { hint, .. }) => assert!(hint.contains("642x452")),
+                other => panic!("expected InvalidArgsHint, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn formulas_use_the_requested_origin() {
+        assert_eq!(
+            formula("win", 90, 100, "1.0"),
+            "win_x = 90 + px / 1.0; win_y = 100 + py / 1.0"
+        );
+        let g = WindowGeo {
+            frame: FRAME,
+            client: Some(Rect {
+                x: 208,
+                y: 181,
+                w: 640,
+                h: 420,
+            }),
+        };
+        let v = window_json(&g);
+        assert_eq!(v["client_offset"], json!({"x": 1, "y": 31}));
+        assert_eq!(v["frame"]["w"], 642);
     }
 }

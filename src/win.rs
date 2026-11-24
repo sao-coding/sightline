@@ -10,8 +10,8 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
+    ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -21,9 +21,9 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_STYLE, GetClassNameW, GetWindow, GetWindowDisplayAffinity,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, WS_POPUP,
+    EnumWindows, GW_OWNER, GWL_STYLE, GetClassNameW, GetClientRect, GetWindow,
+    GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, WS_POPUP,
 };
 use windows::core::{BOOL, PWSTR};
 
@@ -202,6 +202,23 @@ pub fn frame_bounds(hwnd: u64) -> Option<Rect> {
     } else {
         window_rect(hwnd)
     }
+}
+
+/// The client area in screen physical px (GetClientRect + ClientToScreen).
+pub fn client_rect_screen(hwnd: u64) -> Option<Rect> {
+    let h = hwnd_from_u64(hwnd);
+    let mut r = RECT::default();
+    unsafe { GetClientRect(h, &mut r) }.ok()?;
+    let mut origin = POINT { x: 0, y: 0 };
+    if !unsafe { ClientToScreen(h, &mut origin) }.as_bool() {
+        return None;
+    }
+    Some(Rect {
+        x: origin.x,
+        y: origin.y,
+        w: r.right - r.left,
+        h: r.bottom - r.top,
+    })
 }
 
 pub fn window_dpi_scale(hwnd: u64) -> f64 {

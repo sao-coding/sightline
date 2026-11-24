@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -5,6 +7,9 @@ use thiserror::Error;
 pub enum SightError {
     #[error("{0}")]
     InvalidArgs(String),
+    /// Like `InvalidArgs`, with a situation-specific hint (e.g. the window size).
+    #[error("{msg}")]
+    InvalidArgsHint { msg: String, hint: String },
     #[error("{0}")]
     TargetNotFound(String),
     #[error("window is minimized")]
@@ -22,7 +27,7 @@ pub enum SightError {
 impl SightError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidArgs(_) => "INVALID_ARGS",
+            Self::InvalidArgs(_) | Self::InvalidArgsHint { .. } => "INVALID_ARGS",
             Self::TargetNotFound(_) => "TARGET_NOT_FOUND",
             Self::WindowMinimized => "WINDOW_MINIMIZED",
             Self::WindowProtected => "WINDOW_PROTECTED",
@@ -34,7 +39,7 @@ impl SightError {
 
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::InvalidArgs(_) => 1,
+            Self::InvalidArgs(_) | Self::InvalidArgsHint { .. } => 1,
             Self::TargetNotFound(_) => 2,
             Self::WindowMinimized | Self::WindowProtected => 3,
             Self::Permission(_) => 4,
@@ -43,16 +48,19 @@ impl SightError {
         }
     }
 
-    pub fn hint(&self) -> &'static str {
-        match self {
+    pub fn hint(&self) -> Cow<'_, str> {
+        Cow::Borrowed(match self {
             Self::InvalidArgs(_) => "run `sight --help` for usage",
+            Self::InvalidArgsHint { hint, .. } => hint,
             Self::TargetNotFound(_) => "run `sight list` to see available targets",
             Self::WindowMinimized => "restore the window and retry",
             Self::WindowProtected => "the window opted out of capture (display affinity)",
             Self::Permission(_) => "run with sufficient privileges for the target process",
-            Self::Timeout(_) => "increase --timeout or --settle",
+            Self::Timeout(_) => {
+                "increase --timeout or --settle; with --expect-change/--change, make sure the action really changes pixels in the target"
+            }
             Self::Internal(_) => "run `sight doctor` to check the environment",
-        }
+        })
     }
 }
 

@@ -1,11 +1,10 @@
 //! Frame acquisition on top of windows-capture (Windows Graphics Capture).
 //!
 //! `grab` runs one capture session on a window or monitor, crops each frame on
-//! the GPU, and (optionally) waits until the cropped pixels stop changing.
+//! the GPU, and (optionally) waits for the cropped pixels to change and/or to
+//! stop changing.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use image::RgbaImage;
@@ -28,34 +27,47 @@ pub enum CropSpec {
     Rect(Rect),
     /// A window's DWM frame bounds. WGC window frames are usually exactly the
     /// DWM bounds, but some are the full GetWindowRect (with invisible borders);
-    /// the frame size at arrival time tells which.
-    WindowFrame { frame: Rect, window: Rect },
+    /// the frame size at arrival time tells which. `sub` optionally narrows the
+    /// result to a rect relative to the DWM frame's top-left.
+    WindowFrame {
+        frame: Rect,
+        window: Rect,
+        sub: Option<Rect>,
+    },
 }
 
 impl CropSpec {
     fn resolve(&self, fw: i32, fh: i32) -> (Rect, (i32, i32)) {
         match self {
             Self::Rect(r) => (*r, (0, 0)),
-            Self::WindowFrame { frame, window } => {
-                if (fw, fh) == (window.w, window.h) && (fw, fh) != (frame.w, frame.h) {
-                    let r = Rect {
-                        x: frame.x - window.x,
-                        y: frame.y - window.y,
-                        w: frame.w,
-                        h: frame.h,
-                    };
-                    (r, (window.x, window.y))
-                } else {
-                    (
-                        Rect {
-                            x: 0,
-                            y: 0,
+            Self::WindowFrame { frame, window, sub } => {
+                let (base, origin) =
+                    if (fw, fh) == (window.w, window.h) && (fw, fh) != (frame.w, frame.h) {
+                        let r = Rect {
+                            x: frame.x - window.x,
+                            y: frame.y - window.y,
                             w: frame.w,
                             h: frame.h,
-                        },
-                        (frame.x, frame.y),
-                    )
-                }
+                        };
+                        (r, (window.x, window.y))
+                    } else {
+                        (
+                            Rect {
+                                x: 0,
+                                y: 0,
+                                w: frame.w,
+                                h: frame.h,
+                            },
+                            (frame.x, frame.y),
+                        )
+                    };
+                let r = sub.map_or(base, |s| Rect {
+                    x: base.x + s.x,
+                    y: base.y + s.y,
+                    w: s.w,
+                    h: s.h,
+                });
+                (r, origin)
             }
         }
     }
@@ -66,13 +78,56 @@ pub enum Source {
     Monitor(isize),
 }
 
+/// How long and for what to wait. Cheap to clone; clones share the change
+/// signal, so several concurrent sessions (one per monitor) agree on it.
+#[derive(Clone)]
+pub struct Opts {
+    /// Quiet period required after the last change.
+    pub settle: Option<Duration>,
+    /// Number of differing pixels that counts as "the image changed". 1 is an
+    /// exact compare; larger values ignore noise such as a blinking caret.
+    pub min_change_px: usize,
+    /// Wait for the first change (against the first frame) before settling.
+    pub expect_change: bool,
+    /// Reference point for `change_ms`.
+    pub start: Instant,
+    pub deadline: Instant,
+    changed: Arc<OnceLock<Instant>>,
+}
+
+impl Opts {
+    pub fn new(
+        settle: Option<Duration>,
+        min_change_px: usize,
+        expect_change: bool,
+        start: Instant,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            settle,
+            min_change_px: min_change_px.max(1),
+            expect_change,
+            start,
+            deadline,
+            changed: Arc::default(),
+        }
+    }
+
+    /// Milliseconds from `start` to the first change, if one was seen.
+    pub fn change_ms(&self) -> Option<u64> {
+        self.changed
+            .get()
+            .map(|t| t.saturating_duration_since(self.start).as_millis() as u64)
+    }
+}
+
 pub struct Grab {
     pub img: RgbaImage,
     /// Crop actually applied, in frame (texture) coordinates.
     pub crop: Rect,
     /// Screen position of the frame texture's (0,0); only set for window sources.
     pub origin: (i32, i32),
-    /// False when `--settle` was requested and the timeout hit first.
+    /// False when the wait (change and/or settle) hit the deadline first.
     pub settled: bool,
 }
 
@@ -80,8 +135,10 @@ struct Latest {
     bgra: Vec<u8>,
     crop: Rect,
     origin: (i32, i32),
-    hash: u64,
+    /// When this frame (the last accepted one) arrived.
     changed_at: Instant,
+    /// When the first frame that differed from the baseline arrived.
+    first_change: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -90,21 +147,40 @@ struct Shared {
     error: Mutex<Option<String>>,
 }
 
+/// Number of pixels (4-byte BGRA groups) that differ; `usize::MAX` when the
+/// buffers have different sizes (the window was resized).
+fn differing_px(a: &[u8], b: &[u8]) -> usize {
+    if a.len() != b.len() {
+        return usize::MAX;
+    }
+    if a == b {
+        return 0;
+    }
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
+        .filter(|(p, q)| p != q)
+        .count()
+}
+
 struct Handler {
     shared: Arc<Shared>,
     want: Arc<CropSpec>,
+    min_px: usize,
     tmp: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
-    type Flags = (Arc<Shared>, Arc<CropSpec>);
+    type Flags = (Arc<Shared>, Arc<CropSpec>, usize);
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (shared, want) = ctx.flags;
+        let (shared, want, min_px) = ctx.flags;
         Ok(Self {
             shared,
             want,
+            min_px,
             tmp: Vec::new(),
         })
     }
@@ -127,26 +203,39 @@ impl GraphicsCaptureApiHandler for Handler {
             .buffer_crop(x0 as u32, y0 as u32, x1 as u32, y1 as u32)
             .map_err(|e| e.to_string())?;
         let data = buf.as_nopadding_buffer(&mut self.tmp);
-        let mut hasher = DefaultHasher::new();
-        hasher.write(data);
-        let hash = hasher.finish();
+        let crop = Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        };
 
         let mut latest = self.shared.latest.lock().unwrap();
-        if latest.as_ref().is_some_and(|l| l.hash == hash) {
-            return Ok(()); // new frame, identical pixels: not a change
+        let now = Instant::now();
+        match latest.as_mut() {
+            // Compared against the last *accepted* frame, so sub-threshold
+            // noise is dropped but slow drift still adds up to a change.
+            Some(l) => {
+                if l.crop == crop && differing_px(&l.bgra, data) < self.min_px {
+                    return Ok(());
+                }
+                l.bgra.clear();
+                l.bgra.extend_from_slice(data);
+                l.crop = crop;
+                l.origin = origin;
+                l.changed_at = now;
+                l.first_change.get_or_insert(now);
+            }
+            None => {
+                *latest = Some(Latest {
+                    bgra: data.to_vec(),
+                    crop,
+                    origin,
+                    changed_at: now,
+                    first_change: None,
+                });
+            }
         }
-        *latest = Some(Latest {
-            bgra: data.to_vec(),
-            crop: Rect {
-                x: x0,
-                y: y0,
-                w: x1 - x0,
-                h: y1 - y0,
-            },
-            origin,
-            hash,
-            changed_at: Instant::now(),
-        });
         Ok(())
     }
 }
@@ -171,17 +260,16 @@ fn border_setting() -> DrawBorderSettings {
     }
 }
 
-/// Capture `crop` (frame coordinates) from `source`. With `settle`, keep
-/// capturing until the cropped pixels have been unchanged for that long or
-/// `deadline` passes (then `settled` is false but the latest image is kept).
-pub fn grab(
-    source: &Source,
-    crop: CropSpec,
-    settle: Option<Duration>,
-    deadline: Instant,
-) -> Result<Grab, SightError> {
+/// Capture `crop` (frame coordinates) from `source`.
+///
+/// The first frame is the baseline. With `opts.expect_change`, the wait first
+/// needs a frame that differs from the baseline by at least `min_change_px`
+/// pixels; then, with `opts.settle`, the image must stay unchanged for that
+/// long. If `opts.deadline` passes first, `settled` is false but the latest
+/// image is kept (`opts.change_ms()` tells whether a change was seen).
+pub fn grab(source: &Source, crop: CropSpec, opts: &Opts) -> Result<Grab, SightError> {
     let shared = Arc::new(Shared::default());
-    let flags = (shared.clone(), Arc::new(crop));
+    let flags = (shared.clone(), Arc::new(crop), opts.min_change_px);
     macro_rules! start {
         ($item:expr) => {
             Handler::start_free_threaded(Settings::new(
@@ -215,23 +303,23 @@ pub fn grab(
             break;
         }
         let now = Instant::now();
-        let have = {
+        let snapshot = {
             let l = shared.latest.lock().unwrap();
             l.as_ref()
-                .map(|l| now.saturating_duration_since(l.changed_at))
+                .map(|l| (now.saturating_duration_since(l.changed_at), l.first_change))
         };
-        match (have, settle) {
-            (Some(_), None) => {
+        if let Some((quiet, first_change)) = snapshot {
+            if let Some(t) = first_change {
+                let _ = opts.changed.set(t);
+            }
+            let ready = !opts.expect_change || opts.changed.get().is_some();
+            let calm = opts.settle.is_none_or(|s| quiet >= s);
+            if ready && calm {
                 settled = true;
                 break;
             }
-            (Some(quiet), Some(s)) if quiet >= s => {
-                settled = true;
-                break;
-            }
-            _ => {}
         }
-        if now >= deadline {
+        if now >= opts.deadline {
             break;
         }
     }
@@ -264,21 +352,20 @@ pub fn grab(
 
 /// Screen-capture an arbitrary physical-pixel region (so popups and menus are
 /// included), stitching across monitors. Areas outside every monitor are black.
+/// Monitors are captured concurrently, so they share one `--timeout`.
 pub fn grab_region(
     region: Rect,
-    settle: Option<Duration>,
-    deadline: Instant,
+    opts: &Opts,
     warnings: &mut Vec<String>,
 ) -> Result<(RgbaImage, bool), SightError> {
-    let mons = win::monitors();
     let mut canvas = RgbaImage::from_pixel(
         region.w as u32,
         region.h as u32,
         image::Rgba([0, 0, 0, 255]),
     );
-    let mut settled = true;
+    let mut parts = Vec::new();
     let mut covered = 0i64;
-    for m in &mons {
+    for m in &win::monitors() {
         let Some(inter) = region.intersect(&m.rect) else {
             continue;
         };
@@ -289,12 +376,32 @@ pub fn grab_region(
             w: inter.w,
             h: inter.h,
         };
-        let g = grab(
-            &Source::Monitor(m.hmon),
-            CropSpec::Rect(local),
-            settle,
-            deadline,
-        )?;
+        parts.push((m.hmon, inter, local));
+    }
+    if covered == 0 {
+        return Err(SightError::InvalidArgs(format!(
+            "region {},{},{},{} does not intersect any monitor",
+            region.x, region.y, region.w, region.h
+        )));
+    }
+    let results: Vec<Result<Grab, SightError>> = std::thread::scope(|s| {
+        let handles: Vec<_> = parts
+            .iter()
+            .map(|&(hmon, _, local)| {
+                s.spawn(move || grab(&Source::Monitor(hmon), CropSpec::Rect(local), opts))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(SightError::Internal("capture thread panicked".into())))
+            })
+            .collect()
+    });
+    let mut settled = true;
+    for ((_, inter, _), g) in parts.iter().zip(results) {
+        let g = g?;
         settled &= g.settled;
         image::imageops::replace(
             &mut canvas,
@@ -303,14 +410,58 @@ pub fn grab_region(
             i64::from(inter.y - region.y),
         );
     }
-    if covered == 0 {
-        return Err(SightError::InvalidArgs(format!(
-            "region {},{},{},{} does not intersect any monitor",
-            region.x, region.y, region.w, region.h
-        )));
-    }
     if covered < region.area() {
         warnings.push("region_partially_offscreen".into());
     }
     Ok((canvas, settled))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn differing_px_counts_pixels_not_bytes() {
+        let a = [0u8, 0, 0, 255, 1, 1, 1, 255];
+        let mut b = a;
+        assert_eq!(differing_px(&a, &b), 0);
+        b[0] = 9;
+        b[1] = 9; // same pixel, two bytes
+        assert_eq!(differing_px(&a, &b), 1);
+        b[4] = 2;
+        assert_eq!(differing_px(&a, &b), 2);
+        assert_eq!(differing_px(&a, &b[..4]), usize::MAX);
+    }
+
+    #[test]
+    fn window_frame_crop_is_relative_to_the_dwm_frame() {
+        let frame = Rect {
+            x: 100,
+            y: 50,
+            w: 800,
+            h: 600,
+        };
+        let window = Rect {
+            x: 92,
+            y: 50,
+            w: 816,
+            h: 608,
+        };
+        let sub = Some(Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        });
+        let spec = CropSpec::WindowFrame { frame, window, sub };
+        // Frame texture equals the DWM frame.
+        let (r, origin) = spec.resolve(800, 600);
+        assert_eq!((r.x, r.y, r.w, r.h), (10, 20, 30, 40));
+        assert_eq!(origin, (100, 50));
+        // Frame texture equals GetWindowRect (invisible borders included).
+        let (r, origin) = spec.resolve(816, 608);
+        assert_eq!((r.x, r.y, r.w, r.h), (8 + 10, 20, 30, 40));
+        assert_eq!(origin, (92, 50));
+        assert_eq!(origin.0 + r.x, 100 + 10); // same screen x either way
+    }
 }

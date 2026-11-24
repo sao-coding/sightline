@@ -4,6 +4,7 @@ mod list;
 mod output;
 mod shot;
 mod stat;
+mod wait;
 mod win;
 
 use clap::{Parser, Subcommand, error::ErrorKind};
@@ -26,6 +27,8 @@ enum Cmd {
     List(list::ListArgs),
     /// Take a screenshot
     Shot(shot::ShotArgs),
+    /// Wait for the UI to change and/or settle, without saving an image
+    Wait(wait::WaitArgs),
     /// Sample process stats
     Stat(stat::StatArgs),
     /// Check the environment
@@ -66,6 +69,7 @@ fn main() {
     let result = match &cli.command {
         Cmd::List(a) => list::run(a).map_err(Into::into),
         Cmd::Shot(a) => shot::run(a),
+        Cmd::Wait(a) => wait::run(a),
         Cmd::Stat(a) => stat::run(a).map_err(Into::into),
         Cmd::Doctor => doctor().map(|d| (d, Vec::new())).map_err(Into::into),
     };

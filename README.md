@@ -11,16 +11,17 @@
 
 Eyes and a stopwatch for AI coding agents on Windows. One small exe, command `sight`.
 
-sightline finds windows, screenshots them even when covered, waits until the UI stops changing,
-and tells the agent how image pixels map to screen pixels. It also measures CPU and memory of a
-whole process tree. It **only observes**: it never clicks, types or moves the mouse. The agent
-acts with its own tools, then uses sightline to check the result.
+sightline finds windows, screenshots them even when covered, waits for the UI to change and then stop
+changing, and tells the agent how image pixels map to screen, window and client coordinates. It also
+measures CPU and memory of a whole process tree. It **only observes**: it never clicks, types or
+moves the mouse. The agent acts with its own tools, then uses sightline to check the result.
 
 [Why](#why-sightline) • [Install](#install) • [Quick start](#quick-start) • [Use with agents](#use-it-with-ai-agents) • [Reference](docs/REFERENCE.md) • [FAQ](#faq)
 
 ```
 sight list --exe notepad                  # which window?
 sight shot --hwnd 15603054 --settle 300   # what does it look like, once it is stable?
+sight wait --hwnd 15603054 --change --settle 300   # after my click: has the UI changed and settled?
 sight stat --pid 19668 --duration 2000    # how much CPU and RAM?
 ```
 
@@ -32,9 +33,11 @@ PowerShell script: `Start-Sleep 3`, `CopyFromScreen`, a hard-coded PID. sightlin
 | The throwaway script | What goes wrong | sightline |
 |---|---|---|
 | `Start-Sleep 3` | Too short is flaky, too long is slow | `--settle 300` waits until pixels stop changing, with a timeout and an honest `settled:false` |
+| `Start-Sleep 0.5` after a click | The UI may not have started changing yet, so a plain settle returns the old frame | `--expect-change` waits for pixels to differ from a baseline first, then settles |
 | `CopyFromScreen` | Whatever is on top ends up in the image | `shot --hwnd` captures the window itself, even when covered |
 | Window capture APIs | Right-click menus are separate windows and get missed | The app's own popups are detected and included |
 | The model resizes the image | Pixel positions no longer match the screen | Every shot returns a `formula` from image px to screen px |
+| Hand-cut `Crop`, window moved to a fixed spot first | Breaks when the window is somewhere else | `--crop x,y,w,h` is window-relative and position-independent; `formula_window` and `formula_client` map pixels to window and client coordinates |
 | 150% DPI scaling | Hand-made coordinate math breaks | Per-Monitor DPI aware; reports `dpi_scale` and `monitor_dpi_scale` |
 | `Get-Process` | One process, hard-coded PID | `list` finds the PID; `stat` covers the whole tree with avg / p95 / max |
 | Free-form text | The agent parses prose and guesses what failed | One JSON line, stable error codes, and a `hint` naming the next step |
@@ -47,7 +50,8 @@ costs one file read instead of thousands of tokens.
 | Command | Answers | Notes |
 |---|---|---|
 | `list` | Which windows exist, and which PID / HWND do I target? | Rect, monitor, DPI, minimized state; noisy windows hidden by default |
-| `shot` | What does this window look like now? | Covered windows, popups, settle wait, coordinate `formula` |
+| `shot` | What does this window look like now? | Covered windows, popups, change and settle wait, window-relative `--crop`, coordinate formulas |
+| `wait` | Has the UI changed and settled after my action? | Same waiting as `shot`, no image; `changed`, `change_ms`, `settled` |
 | `stat` | How much CPU and RAM over time? | Whole process tree (Electron, browsers, games); private bytes |
 | `doctor` | What monitors and DPI scales does this machine have? | First stop when something looks off |
 
@@ -111,8 +115,25 @@ One turn of the agent loop:
    {"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\shot-20261123-214402-405.jpg","image":{"w":1178,"h":637},"maps_to":{"space":"screen_physical","x":3010,"y":362,"w":1178,"h":637},"scale":1.0,"formula":"screen_x = 3010 + px / 1.0; screen_y = 362 + py / 1.0","settled":true,"elapsed_ms":945,"popups":[]},"warnings":[]}
    ```
 
-3. **Act** with the agent's own input tool, at screen coordinates computed from `formula`.
-4. **Re-check** with the same `shot` and compare. For performance, run `stat` while the app works:
+3. **Act** with the agent's own input tool, at coordinates computed from the formulas below.
+4. **Wait for the UI**, then look. Right after an external click the UI may not have started
+   changing, so a plain `--settle` could return the old frame. `--expect-change` (or `wait
+   --change`) first waits for pixels to differ from a baseline, then settles. Both phases share
+   `--timeout`:
+
+   ```
+   > sight wait --hwnd 15603054 --change --settle 300
+   {"v":1,"ok":true,"data":{"changed":true,"change_ms":326,"settled":true,"elapsed_ms":492},"warnings":[]}
+   > sight shot --hwnd 15603054 --expect-change --settle 300     # same wait, then saves the image
+   ```
+
+   If nothing changes before the timeout, `shot` still saves the latest frame and both commands
+   fail with `TIMEOUT` (exit 5) and `data.changed:false`. Tiny noise such as a blinking caret does
+   not count: a change needs `--min-change-px` differing pixels (default 16). The baseline is the
+   first captured frame, which arrives about 0.3 s after `sight` starts, so a change that already
+   finished by then is not seen (`TIMEOUT`, `changed:false`: take a plain `shot` and look).
+
+5. **Re-check** with the same `shot` and compare. For performance, run `stat` while the app works:
 
    ```
    > sight stat --pid 17400 --duration 2000
@@ -120,6 +141,31 @@ One turn of the agent loop:
    ```
 
    One full core (`cpu_core_pct` ≈ 100) out of 16 (`cpu_total_pct` ≈ 6.3): a busy loop.
+
+### Coordinates: pick the origin your input tool uses
+
+For a window shot, `shot` returns one formula per origin. Use the one that matches the origin of
+your own input tool, with `px, py` in the saved image:
+
+```
+> sight shot --hwnd 11736012 --crop 100,120,300,200 --max-edge 0
+{"v":1,"ok":true,"data":{"image":{"w":300,"h":200},"maps_to":{"space":"screen_physical","x":307,"y":270,"w":300,"h":200},"scale":1.0,"formula":"screen_x = 307 + px / 1.0; screen_y = 270 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 100 + px / 1.0; win_y = 120 + py / 1.0","formula_client":"client_x = 99 + px / 1.0; client_y = 89 + py / 1.0","settled":true,"changed":false,"change_ms":null,"elapsed_ms":351,"popups":[]},"warnings":[]}
+```
+
+| Field | Origin | Use it for |
+|---|---|---|
+| `formula` | the screen (virtual desktop), physical px | tools that click at absolute screen coordinates |
+| `formula_window` | top-left of the window's DWM frame | tools relative to the window; same origin as `--crop` |
+| `formula_client` | top-left of the client area, below the title bar | tools relative to the client area |
+
+`window.frame` and `window.client` are in screen px; `client_offset` is the client top-left minus
+the frame top-left. Image point (50, 40) above is screen (357, 310), window (150, 160), client
+(149, 129).
+
+`--crop x,y,w,h` is relative to the window frame, so it selects the same part of the window
+wherever the window is. It is applied before `--scale` and `--max-edge`; `--max-edge 0` disables
+downscaling, so `--crop ... --max-edge 0` is exactly w×h pixels. It works with `--hwnd` and `--pid`
+(not `--region`), and `wait` accepts it too.
 
 ## Use it with AI agents
 
@@ -158,6 +204,10 @@ cargo test
 
 ## Limitations
 
+- `--expect-change` / `wait --change` baseline on the first captured frame (about 0.3 s after
+  start), so a change that finished earlier is not detected.
+- The window formulas and `--crop` were only verified on 100% DPI monitors; they are plain physical-px
+  arithmetic, but not tested at 125% or 150%.
 - `WINDOW_PROTECTED` is untested against a real capture-protected window.
 - Classic Win32 `#32768` menus are untested, so their popup fallback is unverified.
 - The PID-reuse check uses process start time at 1-second resolution, so a PID reused within the

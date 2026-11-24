@@ -41,7 +41,7 @@ Check it works with `sight doctor`.
 
 ### `shot`: screenshot
 
-`sight shot (--pid N | --hwnd N | --region x,y,w,h) [--settle ms] [--scale F] [--max-edge N] [--timeout ms] [--out path]`
+`sight shot (--pid N | --hwnd N | --region x,y,w,h) [--expect-change] [--settle ms] [--min-change-px N] [--crop x,y,w,h] [--scale F] [--max-edge N] [--timeout ms] [--out path]`
 
 Exactly one target:
 
@@ -56,14 +56,36 @@ Options:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--settle ms` | off | wait until the image has not changed for this many ms (bounded by `--timeout`). Use ~300 after an action so animations finish |
-| `--timeout ms` | 5000 | overall capture timeout |
+| `--expect-change` | off | take the first frame as a baseline and wait until pixels differ from it, **then** apply `--settle`. Use right after an external click or keypress: plain `--settle` can return the old frame because the UI has not started changing yet. Both phases share `--timeout` |
+| `--min-change-px N` | 16 with `--expect-change`, else 1 (exact) | how many pixels must differ to count as a change; ignores a blinking caret. With N > 1 a smaller difference can be missing from the saved image |
+| `--crop x,y,w,h` | none | keep only this rect, relative to the window's DWM frame top-left, in physical px. `--hwnd`/`--pid` only (`INVALID_ARGS` with `--region`, or when it falls outside the window; the hint gives the window size). Applied before `--scale`/`--max-edge`, so `--crop ... --max-edge 0` gives exactly w×h pixels. Works wherever the window is |
+| `--timeout ms` | 5000 | overall timeout, shared by the change and settle phases |
 | `--scale F` | 1 | resize factor, must be in (0,16]; nearest neighbour when > 1; a scale > 1 writes PNG |
-| `--max-edge N` | 1568 | downscale so the long edge is at most N px; `0` = no limit |
+| `--max-edge N` | 1568 | downscale so the long edge is at most N px; **`0` disables downscaling** (1:1 pixels) |
 | `--out path` | temp dir `sightline/` | output path; `.png` / `.jpg` picks the format |
 
-`data`: `path`, `image` (`w`,`h`), `maps_to` (`space`, `x`,`y`,`w`,`h`: the screen rect covered), `scale`, `dpi_scale`, `monitor_dpi_scale`, `formula`, `settled`, `elapsed_ms`, and `popups[]` when popups were detected.
+`data`: `path`, `image` (`w`,`h`), `maps_to` (`space`, `x`,`y`,`w`,`h`: the screen rect covered, crop included), `scale`, `dpi_scale`, `monitor_dpi_scale`, `formula`, then for windows `window`, `formula_window`, `formula_client`, and `settled`, `changed`, `change_ms`, `elapsed_ms`, and `popups[]` when popups were detected.
 
-Use `--settle` and compare two shots to see whether the UI changed after an action. `settled:false` means the image was still changing at the timeout.
+```json
+{"v":1,"ok":true,"data":{"path":"...\\shot-20261124-142440-362.png","image":{"w":300,"h":200},"maps_to":{"space":"screen_physical","x":307,"y":270,"w":300,"h":200},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 307 + px / 1.0; screen_y = 270 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 100 + px / 1.0; win_y = 120 + py / 1.0","formula_client":"client_x = 99 + px / 1.0; client_y = 89 + py / 1.0","settled":true,"changed":true,"change_ms":307,"elapsed_ms":562,"popups":[]},"warnings":[]}
+```
+
+`changed` / `change_ms` are always present: whether a frame differing from the first one was seen, and ms from command start to it (`null` when none). `settled:false` means the wait did not finish before the timeout; with `--expect-change` and no change the command fails with `TIMEOUT` (exit 5), still saves the latest frame, and `data.changed` is `false`.
+
+### `wait`: UI ready, no image
+
+`sight wait (--hwnd N | --pid N | --region x,y,w,h) [--change] [--settle ms] [--timeout ms] [--min-change-px N] [--crop x,y,w,h]`
+
+Same logic and flags as `shot` (`--change` is `--expect-change`), but nothing is saved. Use it when you need the UI ready before your next click, not a picture. Output: `changed`, `change_ms`, `settled`, `elapsed_ms`.
+
+```json
+{"v":1,"ok":true,"data":{"changed":true,"change_ms":326,"settled":true,"elapsed_ms":492},"warnings":[]}
+{"v":1,"ok":false,"error":{"code":"TIMEOUT","message":"no change detected within --timeout 1000ms (no image saved)","hint":"..."},"data":{"changed":false,"change_ms":null,"settled":false,"elapsed_ms":1020}}
+```
+
+Use `--crop` on `wait` to watch only the part of the window that should change.
+
+**Limit of `--expect-change` / `--change`.** The baseline is the first captured frame, which arrives about 0.3 s after `sight` starts. A change that finished before then is not seen, so `TIMEOUT` with `changed:false` can mean "already updated": take a plain `shot` and look. For UI that reacts instantly, use `--settle` alone, or start `wait --change` just before you act.
 
 ### `stat`: CPU and memory
 
@@ -84,20 +106,29 @@ All commands accept `--pretty`.
 ## Observe loop
 
 1. `sight list --exe myapp` and note `pid` / `hwnd`.
-2. `sight shot --hwnd H --settle 300` and view `data.path`.
-3. Act with your own tool (click/type) at screen coordinates.
-4. `sight shot --hwnd H --settle 300` again and compare.
+2. Act with your own tool (click/type).
+3. `sight wait --hwnd H --change --settle 300` (is the UI ready?) or `sight shot --hwnd H --expect-change --settle 300` and view `data.path`.
+4. Compare, then act again.
 
-## Image pixels to screen coordinates
+Do not add fixed sleeps after actions, and do not move the window to a fixed place before each shot: `--crop` and the window formulas work wherever the window is.
 
-Use `data.formula` from the same `shot` result:
+## Image pixels to coordinates
 
-```
-screen_x = <x0> + px / <scale>
-screen_y = <y0> + py / <scale>
-```
+`px, py` are pixels in the saved image. `scale` is often not 1.0 (large windows are downscaled by `--max-edge`), so never assume it; always use the formula from the same `shot` result. Results are physical pixels, and screen coordinates can be negative on multi-monitor setups. Formulas are only valid for that image: re-run `shot` after any move or resize.
 
-`px, py` are pixels in the saved image. `x0,y0` are `maps_to.x/y`. `scale` is often not 1.0 (large windows are downscaled by `--max-edge`), so never assume it. Results are physical screen pixels and can be negative on multi-monitor setups. `formula` is only valid for that image: re-run `shot` after any move or resize.
+Three formulas, three origins. **Pick the one that matches the origin your input tool uses.**
+
+| Field | Origin | Example |
+|---|---|---|
+| `formula` | the screen (virtual desktop) | `screen_x = 307 + px / 1.0; screen_y = 270 + py / 1.0` |
+| `formula_window` | top-left of the window's DWM frame (the visible window, title bar included) | `win_x = 100 + px / 1.0; win_y = 120 + py / 1.0` |
+| `formula_client` | top-left of the client area (below the title bar and borders) | `client_x = 99 + px / 1.0; client_y = 89 + py / 1.0` |
+
+- Use `formula` for a tool that clicks at absolute screen coordinates.
+- Use `formula_window` for a tool relative to the window, and for `--crop`, which uses the same origin.
+- Use `formula_client` for a tool relative to the client area, for example a mouse message sent to the window.
+- `data.window` has `frame {x,y,w,h}` (DWM extended frame bounds, screen px), `client {x,y,w,h}` (screen px) and `client_offset {x,y}` (client top-left minus frame top-left, so `client = frame + client_offset`). It and the two window formulas appear for `--hwnd`/`--pid` only, not `--region`.
+- Example: with the output above, image point (50,40) is screen (357,310), window (150,160) and client (149,129).
 
 ## Errors
 
@@ -105,12 +136,12 @@ Exit codes: 0 ok, 1 INVALID_ARGS, 2 TARGET_NOT_FOUND, 3 WINDOW_MINIMIZED / WINDO
 
 | Code | Exit | Do |
 |---|---|---|
-| `INVALID_ARGS` | 1 | Fix flags: exactly one of `--pid`/`--hwnd`/`--region`; scale in (0,16]; duration/interval > 0. Also returned for bad CLI syntax. |
+| `INVALID_ARGS` | 1 | Fix flags: exactly one of `--pid`/`--hwnd`/`--region`; scale in (0,16]; duration/interval > 0; `--crop` only with `--pid`/`--hwnd` and inside the window (the hint gives the window size). Also returned for bad CLI syntax. |
 | `TARGET_NOT_FOUND` | 2 | The pid/hwnd is gone or has no visible window. Run `list` again. |
 | `WINDOW_MINIMIZED` | 3 | Restore the window with your own tool, then retry. |
 | `WINDOW_PROTECTED` | 3 | The window opted out of capture. Do not retry; tell the user. |
 | `PERMISSION_DENIED` | 4 | Target is likely elevated. Use a higher-privilege shell, or tell the user. |
-| `TIMEOUT` | 5 | Image never settled or no frame arrived. If `data.path` exists the latest frame was saved and is usable. Otherwise raise `--timeout` or lower `--settle`. |
+| `TIMEOUT` | 5 | Image never settled, no change was seen (`data.changed:false`), or no frame arrived. If `data.path` exists the latest frame was saved and is usable. Otherwise raise `--timeout` or lower `--settle`. |
 | `INTERNAL` | 6 | Run `doctor` and report the message. |
 
 On failure the envelope may still carry `data` (for example the saved image after a timeout) and `warnings`.
@@ -119,9 +150,10 @@ On failure the envelope may still carry `data` (for example the saved image afte
 
 - **DPI-unaware windows.** Warning `window_dpi_unaware_or_virtualized`: `dpi_scale` differs from `monitor_dpi_scale`. Coordinates are still physical pixels, but check that your input tool also uses physical pixels.
 - **Mixed DPI regions.** Warning `region_spans_mixed_dpi`: the `--region` crosses monitors with different DPI scales.
-- **Popups and menus.** A window with a popup (menu, dropdown) makes `shot` fall back to screen capture (warning `popups_included_via_screen_capture`); `maps_to` is the union rect and `formula` already accounts for it. To capture a popup yourself, use `--region` (screen capture).
+- **Popups and menus.** A window with a popup (menu, dropdown) makes `shot` fall back to screen capture (warning `popups_included_via_screen_capture`); `maps_to` is the union rect (with `--crop`, just the cropped rect) and all formulas already account for it. To capture a popup yourself, use `--region` (screen capture).
 - **Minimized windows** cannot be captured (`WINDOW_MINIMIZED`) have no `rect`/`monitor` in `list`. Restore them first.
-- **Stale formula.** Moving or resizing the window invalidates `formula`; shoot again.
+- **Stale formula.** Moving or resizing the window invalidates all three formulas; shoot again. `--crop` is window-relative, so it keeps selecting the same part of the window after a move.
+- **Race after a click.** Plain `--settle` can return the old frame if the UI has not started changing yet; use `--expect-change` / `wait --change`.
 - **`--pid` picks the largest visible window**; when an app has several windows use `list` and `--hwnd`.
-- **Large images.** The long edge is capped at 1568 px by default; use `--max-edge 0` or `--scale` when you need full resolution, and remember the formula divides by the reported `scale`.
-- Untested: `WINDOW_PROTECTED`, and classic Win32 `#32768` menus.
+- **Large images.** The long edge is capped at 1568 px by default; use `--max-edge 0` (no downscaling) or `--scale` when you need full resolution, and remember the formulas divide by the reported `scale`.
+- Untested: `WINDOW_PROTECTED`, classic Win32 `#32768` menus, and windows at a DPI scale other than 100%.

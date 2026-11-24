@@ -11,13 +11,14 @@
 
 讓 Windows 上的 AI 程式設計代理有眼睛、也有碼錶。單一小型執行檔，指令是 `sight`。
 
-sightline 能找出視窗、被擋住也照樣截圖、等畫面不再變動才出圖，並告訴代理影像像素要怎麼換算成螢幕像素；也能量測整棵程序樹的 CPU 與記憶體。它**只看、只量**：從不點擊、不輸入、不移動滑鼠。操作交給代理自己的工具，sightline 負責確認結果。
+sightline 能找出視窗、被擋住也照樣截圖、等畫面先變化再穩定才出圖，並告訴代理影像像素要怎麼換算成螢幕、視窗和用戶區座標；也能量測整棵程序樹的 CPU 與記憶體。它**只看、只量**：從不點擊、不輸入、不移動滑鼠。操作交給代理自己的工具，sightline 負責確認結果。
 
 [為什麼](#為什麼需要它) • [安裝](#安裝) • [快速開始](#快速開始) • [搭配代理](#搭配-ai-代理使用) • [參考文件](docs/REFERENCE.zh-TW.md) • [常見問題](#常見問題)
 
 ```
 sight list --exe notepad                  # 哪個視窗？
 sight shot --hwnd 15603054 --settle 300   # 等畫面穩定後長什麼樣？
+sight wait --hwnd 15603054 --change --settle 300   # 我點完之後，UI 變了並穩定了嗎？
 sight stat --pid 19668 --duration 2000    # 用了多少 CPU 和記憶體？
 ```
 
@@ -28,9 +29,11 @@ sight stat --pid 19668 --duration 2000    # 用了多少 CPU 和記憶體？
 | 現在的腳本 | 問題 | sightline 的做法 |
 |---|---|---|
 | `Start-Sleep 3` | 等太短不穩定，等太長浪費時間 | `--settle 300` 等到像素不再變動；有逾時，沒穩定就老實回報 `settled:false` |
+| 點擊後 `Start-Sleep 0.5` | UI 可能還沒開始變，單用 settle 會回傳舊畫面 | `--expect-change` 先等像素與基準畫面出現差異，再等穩定 |
 | `CopyFromScreen` | 疊在上面的其他視窗也被截進去 | `shot --hwnd` 直接擷取目標視窗，被遮住也沒關係 |
 | 視窗擷取 API | 右鍵選單是獨立的頂層視窗，會被漏掉 | 自動偵測並帶上該程式自己的彈出選單 |
 | 模型自動縮放影像 | 圖上的位置對不上螢幕 | 每張影像都附上從影像像素到螢幕像素的 `formula` |
+| 手工 `Crop`、先把視窗移到固定位置 | 視窗在別處就失效 | `--crop x,y,w,h` 相對於視窗、與視窗位置無關；`formula_window`、`formula_client` 把像素換算到視窗與用戶區座標 |
 | DPI 縮放 | 150% 縮放下手算座標全錯 | 以 Per-Monitor DPI 感知執行，並提供 `dpi_scale` 與 `monitor_dpi_scale` |
 | `Get-Process` | 只看一個程序，PID 還是寫死的 | `list` 找 PID；`stat` 量整棵程序樹，提供 avg/p95/max |
 | 自由格式的文字輸出 | 代理只能讀文字猜哪裡出錯 | 一行 JSON、固定的錯誤碼，`hint` 直接說下一步 |
@@ -42,7 +45,8 @@ sight stat --pid 19668 --duration 2000    # 用了多少 CPU 和記憶體？
 | 指令 | 回答的問題 | 主要好處 |
 |---|---|---|
 | `list` | 有哪些視窗？該鎖定哪個 PID / HWND？ | 不必寫死 PID 或標題；提供位置、所在螢幕、DPI、是否最小化 |
-| `shot` | 這個視窗現在長什麼樣子？ | 被遮住也能擷取、帶上彈出選單、等畫面穩定、回傳座標 `formula` |
+| `shot` | 這個視窗現在長什麼樣子？ | 被遮住也能擷取、帶上彈出選單、等變化再等穩定、相對於視窗的 `--crop`、多種座標公式 |
+| `wait` | 我操作之後，UI 變了並穩定了嗎？ | 與 `shot` 相同的等待邏輯，但不出圖；回傳 `changed`、`change_ms`、`settled` |
 | `stat` | 這個程式在一段時間內用了多少 CPU 和記憶體？ | 量整棵程序樹（Electron、瀏覽器、遊戲），avg/p95/max，以私有位元組計算，共用分頁不會重複計入 |
 | `doctor` | 這台電腦有幾個螢幕、各自縮放多少？ | 結果怪怪的時候先跑它 |
 
@@ -105,8 +109,18 @@ sight shot --hwnd 15603054 --settle 300   # 等畫面穩定後擷取
    {"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\shot-20261123-214402-405.jpg","image":{"w":1178,"h":637},"maps_to":{"space":"screen_physical","x":3010,"y":362,"w":1178,"h":637},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 3010 + px / 1.0; screen_y = 362 + py / 1.0","settled":true,"elapsed_ms":945,"popups":[]},"warnings":[]}
    ```
 
-3. **操作。** 用代理自己的輸入工具，在 `formula` 算出的螢幕座標點擊或輸入。
-4. **再驗證。** 再跑一次相同的 `shot` 來比對。要看效能，就在程式工作時跑 `stat`：
+3. **操作。** 用代理自己的輸入工具，依下面的公式算出座標後點擊或輸入。
+4. **等 UI 就緒**，再去看。外部點擊剛發生時，UI 可能還沒開始變，單用 `--settle` 會回傳舊畫面。`--expect-change`（或 `wait --change`）先等像素與基準畫面出現差異，再等穩定，兩個階段共用 `--timeout`：
+
+   ```
+   > sight wait --hwnd 15603054 --change --settle 300
+   {"v":1,"ok":true,"data":{"changed":true,"change_ms":326,"settled":true,"elapsed_ms":492},"warnings":[]}
+   > sight shot --hwnd 15603054 --expect-change --settle 300     # 同樣的等待，之後儲存影像
+   ```
+
+   若逾時前沒有任何變化，`shot` 仍會存下最新一幀，兩個指令都以 `TIMEOUT`（結束碼 5）失敗，並帶 `data.changed:false`。閃爍游標之類的微小雜訊不算變化：需要至少 `--min-change-px` 個像素不同（預設 16）。基準是擷取到的第一幀，它在 `sight` 啟動後約 0.3 秒才抵達，所以在那之前已完成的變化不會被看到（`TIMEOUT` 且 `changed:false`：用一般的 `shot` 看一眼）。
+
+5. **再驗證。** 再跑一次相同的 `shot` 來比對。要看效能，就在程式工作時跑 `stat`：
 
    ```
    > sight stat --pid 17400 --duration 2000
@@ -114,6 +128,25 @@ sight shot --hwnd 15603054 --settle 300   # 等畫面穩定後擷取
    ```
 
    這是一個 PowerShell 無窮迴圈：吃滿一個核心（`cpu_core_pct` ≈ 100），佔 16 核心的約 6.3%（`cpu_total_pct`）。
+
+### 座標：選與你的輸入工具一致的原點
+
+對視窗擷取，`shot` 會為每種原點各給一條公式。請選與你自己的輸入工具一致的那一條，其中 `px, py` 是存下影像裡的像素：
+
+```
+> sight shot --hwnd 11736012 --crop 100,120,300,200 --max-edge 0
+{"v":1,"ok":true,"data":{"image":{"w":300,"h":200},"maps_to":{"space":"screen_physical","x":307,"y":270,"w":300,"h":200},"scale":1.0,"formula":"screen_x = 307 + px / 1.0; screen_y = 270 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 100 + px / 1.0; win_y = 120 + py / 1.0","formula_client":"client_x = 99 + px / 1.0; client_y = 89 + py / 1.0","settled":true,"changed":false,"change_ms":null,"elapsed_ms":351,"popups":[]},"warnings":[]}
+```
+
+| 欄位 | 原點 | 適用於 |
+|---|---|---|
+| `formula` | 螢幕（虛擬桌面），實體像素 | 以絕對螢幕座標點擊的工具 |
+| `formula_window` | 視窗 DWM 邊框的左上角 | 相對於視窗取座標的工具；與 `--crop` 同一原點 |
+| `formula_client` | 用戶區左上角（標題列之下） | 相對於用戶區取座標的工具 |
+
+`window.frame` 與 `window.client` 是螢幕像素；`client_offset` 是用戶區左上角減去邊框左上角。上例中影像上的點 (50, 40) 對應螢幕 (357, 310)、視窗 (150, 160)、用戶區 (149, 129)。
+
+`--crop x,y,w,h` 相對於視窗邊框，所以無論視窗在哪裡，選到的都是視窗的同一部分。它先於 `--scale` 與 `--max-edge` 套用；`--max-edge 0` 表示不縮小，因此 `--crop ... --max-edge 0` 輸出的恰好是 w×h 像素。它可用於 `--hwnd` 與 `--pid`（不能用於 `--region`），`wait` 也接受它。
 
 （以上都是實際執行結果；`...` 表示有刪減。）
 
@@ -151,6 +184,8 @@ cargo test
 
 ## 限制 / 尚未驗證
 
+- `--expect-change` / `wait --change` 以擷取到的第一幀（`sight` 啟動後約 0.3 秒）為基準，在那之前已完成的變化偵測不到。
+- 視窗公式與 `--crop` 只在 100% DPI 的螢幕上驗證過；它們只是實體像素的加減運算，但沒有在 125%、150% 下測試過。
 - `WINDOW_PROTECTED` 尚未在真正禁止擷取的視窗上測試。
 - 傳統 Win32 `#32768` 選單尚未測試，針對它們的彈出視窗備援機制尚未驗證。
 - PID 重複使用的檢查依賴精度為 1 秒的程序啟動時間（`start_unix_s`），同一秒內被重複使用的 PID 偵測不到。
