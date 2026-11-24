@@ -1,0 +1,57 @@
+name: Prepare release
+
+# Opens (or updates) the release PR from the `release` branch to main.
+# Runs when changesets land on main, or manually. Never pushes to main.
+on:
+  push:
+    branches: [main]
+    paths: [".changeset/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check for changesets
+        id: changes
+        run: |
+          if compgen -G ".changeset/*.md" > /dev/null; then
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+            echo "No changesets, nothing to release."
+          fi
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        if: steps.changes.outputs.pending == 'true'
+      - uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
+        if: steps.changes.outputs.pending == 'true'
+        with:
+          version: 0.24.0
+          github-token: ${{ github.token }}
+
+      - name: Configure git identity
+        if: steps.changes.outputs.pending == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Bumps Cargo.toml and CHANGELOG.md on branch `release`, force-pushes it
+      # and opens or updates the PR "chore: release vX.Y.Z".
+      - name: Prepare release PR
+        if: steps.changes.outputs.pending == 'true'
+        run: knope prepare-release --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
