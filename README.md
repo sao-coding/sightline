@@ -133,6 +133,20 @@ One turn of the agent loop:
    first captured frame, which arrives about 0.3 s after `sight` starts, so a change that already
    finished by then is not seen (`TIMEOUT`, `changed:false`: take a plain `shot` and look).
 
+   **Instant reactions: `--baseline`.** Take a shot *before* acting and wait against it, so a change
+   that finishes before `sight` even starts is still detected:
+
+   ```
+   > sight shot --hwnd 15603054 --out before.png
+   # act with your own tool; the UI reacts instantly
+   > sight wait --hwnd 15603054 --baseline before.png --settle 300
+   {"v":1,"ok":true,"data":{"changed":true,"change_ms":318,"settled":true,"elapsed_ms":502},"warnings":[]}
+   ```
+
+   The same order with `wait --change` and no `--baseline` fails with a false `TIMEOUT`. Each shot
+   writes a sidecar `before.sight.json`; a baseline from another window, with another `--crop`, or
+   from a resized window is `INVALID_ARGS`, never a silent wrong comparison.
+
 5. **Re-check** with the same `shot` and compare. For performance, run `stat` while the app works:
 
    ```
@@ -205,7 +219,7 @@ cargo test
 ## Limitations
 
 - `--expect-change` / `wait --change` baseline on the first captured frame (about 0.3 s after
-  start), so a change that finished earlier is not detected.
+  start), so a change that finished earlier is not detected; use `--baseline` for that.
 - The window formulas and `--crop` were only verified on 100% DPI monitors; they are plain physical-px
   arithmetic, but not tested at 125% or 150%.
 - `WINDOW_PROTECTED` is untested against a real capture-protected window.

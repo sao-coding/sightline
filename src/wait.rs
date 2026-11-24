@@ -33,7 +33,7 @@ pub fn run(args: &WaitArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
     } else {
         Err(Box::new(ShotFail {
             err: SightError::Timeout(shot::timeout_message(
-                args.change,
+                args.change || args.cap.baseline.is_some(),
                 cap.changed,
                 args.cap.timeout,
                 "no image saved",

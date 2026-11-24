@@ -35,6 +35,7 @@ Screenshot to a file. Exactly one of `--pid`, `--hwnd`, `--region` is required.
 | `--hwnd <HWND>` | | This window (decimal, as printed by `list`) |
 | `--region x,y,w,h` | | Screen region in physical px; a real screen capture, so anything on top is included |
 | `--crop x,y,w,h` | | Keep only this rect, relative to the window's DWM frame top-left, in physical px. `--pid` / `--hwnd` only (`INVALID_ARGS` with `--region`, or when it falls outside the window; the hint gives the window size). Applied before `--scale` and `--max-edge` |
+| `--baseline <image>` | | Compare against this earlier shot (its `data.path`) instead of the first frame. Implies `--expect-change`. See "Baselines" below |
 | `--scale <F>` | `1.0` | Resize factor in (0, 16]. Above 1 uses nearest neighbour and writes PNG |
 | `--max-edge <N>` | `1568` | Downscale so the long edge is at most N px. **`0` disables downscaling** (1:1 pixels) |
 | `--expect-change` | off | Take the first frame as a baseline and wait until pixels differ from it, then apply `--settle`. For use right after an external click or keypress |
@@ -73,9 +74,44 @@ start-up). A change that finished before then is not seen: `TIMEOUT` with `chang
 the UI already updated, so take a plain `shot` and look. For UI that reacts instantly use
 `--settle` alone, or start the command just before you act.
 
+**Baselines.** `--baseline <image>` replaces "the first frame" with an image you took earlier, so a
+change that completed before `sight` started is still detected. Realistic order:
+
+```
+> sight shot --hwnd 11736012 --out before.png
+# act: the UI reacts instantly
+> sight wait --hwnd 11736012 --baseline before.png --settle 300
+{"v":1,"ok":true,"data":{"changed":true,"change_ms":318,"settled":true,"elapsed_ms":502},"warnings":[]}
+> sight wait --hwnd 11736012 --change --timeout 1500      # same order, no baseline
+{"v":1,"ok":false,"error":{"code":"TIMEOUT","message":"no change detected within --timeout 1500ms (no image saved)",...},"data":{"changed":false,"change_ms":null,"settled":false,"elapsed_ms":1534}}
+```
+
+The first captured frame is compared with the image; if it differs by at least `--min-change-px`
+pixels the change is counted at once (`change_ms` is about the first frame time), then `--settle`
+applies as usual. If it matches, waiting continues for a later change as with `--expect-change`.
+
+- **Comparable only.** Every `shot` writes a sidecar `<name>.sight.json` next to the image (replacing
+  its extension): the target (`window` + `hwnd`, or `region` + rect), the window-relative `crop`, the
+  pixel size after cropping and before scaling (`source`), the saved size (`image`) and the `format`.
+  `--baseline` checks it against the new capture and returns `INVALID_ARGS` with a hint when the
+  target or `--crop` differs, when the pixel size after `--crop` and before scaling differs (including a
+  window that was resized: take the baseline again), or when the image no longer matches its sidecar.
+  Moving a window without resizing it is fine, because crops and comparisons are window-relative.
+  A baseline that is not a sight shot (no sidecar) is assumed to be an unscaled 1:1 image, with the
+  warning `baseline_without_metadata`.
+- **JPEG and scaled baselines need no tolerance.** The default `shot` format is JPEG (quality 80) and
+  the default `--max-edge` downscales big windows. Instead of fuzzy matching, the live frame is run
+  through the same resize and the same JPEG encode/decode as `shot` before it is compared, so
+  identical pixels compare equal exactly. A `.png` with `--max-edge 0` is still the cheapest (no
+  per-frame conversion). The one exception: a scaled or JPEG baseline cannot be cut up for a `--region`
+  (or popup screen capture) that spans several monitors or the screen edge; that is `INVALID_ARGS`, so
+  take that baseline as `.png` with `--max-edge 0`.
+- Other warnings: `baseline_metadata_unreadable`, `baseline_metadata_not_written` (the sidecar could not
+  be written).
+
 ### `wait`
 
-Same target, `--crop`, `--settle`, `--timeout` and `--min-change-px` flags as `shot`, and the same
+Same target, `--crop`, `--settle`, `--timeout`, `--min-change-px` and `--baseline` flags as `shot`, and the same
 waiting logic, but **no image is saved**. `--change` is `--expect-change`. Use it when the agent
 needs the UI ready before its next click.
 
@@ -202,7 +238,7 @@ on a `--settle` or `--expect-change` `TIMEOUT` the latest frame was saved anyway
 | Code | Exit | Meaning | `hint` |
 |---|---|---|---|
 | (success) | 0 | | |
-| `INVALID_ARGS` | 1 | Bad or conflicting flags, `--crop` with `--region`, or a `--crop` outside the window | run `sight --help` for usage (for a bad `--crop`, the hint gives the window size) |
+| `INVALID_ARGS` | 1 | Bad or conflicting flags, `--crop` with `--region`, a `--crop` outside the window, or a `--baseline` that is unreadable or not comparable | run `sight --help` for usage (for a bad `--crop`, the hint gives the window size) |
 | `TARGET_NOT_FOUND` | 2 | No such pid / hwnd / visible window | run `sight list` to see available targets |
 | `WINDOW_MINIMIZED` | 3 | Target is minimized | restore the window and retry |
 | `WINDOW_PROTECTED` | 3 | Window opted out of capture; do not retry | the window opted out of capture (display affinity) |

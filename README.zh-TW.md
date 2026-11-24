@@ -120,6 +120,17 @@ sight shot --hwnd 15603054 --settle 300   # 等畫面穩定後擷取
 
    若逾時前沒有任何變化，`shot` 仍會存下最新一幀，兩個指令都以 `TIMEOUT`（結束碼 5）失敗，並帶 `data.changed:false`。閃爍游標之類的微小雜訊不算變化：需要至少 `--min-change-px` 個像素不同（預設 16）。基準是擷取到的第一幀，它在 `sight` 啟動後約 0.3 秒才抵達，所以在那之前已完成的變化不會被看到（`TIMEOUT` 且 `changed:false`：用一般的 `shot` 看一眼）。
 
+   **瞬間反應：`--baseline`。** 在操作*之前*先截一張圖，再拿它當基準來等，這樣即使變化在 `sight` 啟動之前就已完成，也能偵測到：
+
+   ```
+   > sight shot --hwnd 15603054 --out before.png
+   # 用你自己的工具操作；UI 瞬間就變了
+   > sight wait --hwnd 15603054 --baseline before.png --settle 300
+   {"v":1,"ok":true,"data":{"changed":true,"change_ms":318,"settled":true,"elapsed_ms":502},"warnings":[]}
+   ```
+
+   同樣的順序，用 `wait --change` 而不帶 `--baseline`，會得到假的 `TIMEOUT`。每張截圖都會寫一個旁置檔 `before.sight.json`；來自別的視窗、`--crop` 不同、或視窗被調整過大小的基準會回傳 `INVALID_ARGS`，絕不會悄悄做錯誤的比較。
+
 5. **再驗證。** 再跑一次相同的 `shot` 來比對。要看效能，就在程式工作時跑 `stat`：
 
    ```
@@ -184,7 +195,7 @@ cargo test
 
 ## 限制 / 尚未驗證
 
-- `--expect-change` / `wait --change` 以擷取到的第一幀（`sight` 啟動後約 0.3 秒）為基準，在那之前已完成的變化偵測不到。
+- `--expect-change` / `wait --change` 以擷取到的第一幀（`sight` 啟動後約 0.3 秒）為基準，在那之前已完成的變化偵測不到；這種情況請用 `--baseline`。
 - 視窗公式與 `--crop` 只在 100% DPI 的螢幕上驗證過；它們只是實體像素的加減運算，但沒有在 125%、150% 下測試過。
 - `WINDOW_PROTECTED` 尚未在真正禁止擷取的視窗上測試。
 - 傳統 Win32 `#32768` 選單尚未測試，針對它們的彈出視窗備援機制尚未驗證。

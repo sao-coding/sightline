@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::imageops::FilterType;
 use image::{DynamicImage, RgbaImage};
 use serde_json::{Value, json};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
+use crate::baseline::{self, Loaded, Meta, Size, TargetId};
 use crate::capture::{self, CropSpec, Opts, Source};
 use crate::error::SightError;
 use crate::win::{self, Rect, WinInfo};
@@ -55,6 +55,11 @@ pub struct CaptureArgs {
     /// Wait until the image has not changed for this many ms (up to --timeout)
     #[arg(long)]
     pub settle: Option<u64>,
+    /// Earlier shot image (its data.path) to compare against instead of the first
+    /// frame: a change that finished before sight started is still seen. Implies
+    /// --expect-change/--change
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
     /// Overall timeout (ms), shared by the change and settle phases
     #[arg(long, default_value_t = 5000)]
     pub timeout: u64,
@@ -123,6 +128,8 @@ pub struct Captured {
     /// Popups that forced the screen-capture fallback (window sources only).
     popups: Vec<Value>,
     window: Option<WindowGeo>,
+    target: TargetId,
+    crop: Option<Rect>,
 }
 
 /// Window classes that are popups by nature (menus, tooltips, dropdown lists,
@@ -173,9 +180,25 @@ fn crop_to_screen(crop: Rect, frame: Rect) -> Result<Rect, SightError> {
     })
 }
 
+/// `opts` with `--baseline` matched to a capture of `source` px (after crop, before scaling).
+fn with_baseline(
+    opts: &Opts,
+    baseline: Option<&Loaded>,
+    target: TargetId,
+    crop: Option<Rect>,
+    source: (i32, i32),
+) -> Result<Opts, SightError> {
+    let Some(b) = baseline else {
+        return Ok(opts.clone());
+    };
+    let b = b.prepare(target, crop, (source.0 as u32, source.1 as u32))?;
+    Ok(opts.with_baseline(Some(b)))
+}
+
 fn capture_window(
     hwnd: u64,
     crop: Option<Rect>,
+    baseline: Option<&Loaded>,
     opts: &Opts,
     warnings: &mut Vec<String>,
 ) -> Result<Captured, SightError> {
@@ -198,6 +221,7 @@ fn capture_window(
         )));
     }
 
+    let target = TargetId::Window { hwnd };
     let crop_screen = crop.map(|c| crop_to_screen(c, frame)).transpose()?;
     let geo = WindowGeo {
         frame,
@@ -235,6 +259,7 @@ fn capture_window(
         // the crop keeps meaning the same window-relative area.
         let region =
             crop_screen.unwrap_or_else(|| popups.iter().fold(frame, |u, (p, _)| u.union(&p.rect)));
+        let opts = &with_baseline(opts, baseline, target, crop, (region.w, region.h))?;
         let (img, settled) = capture::grab_region(region, opts, warnings)?;
         warnings.push("popups_included_via_screen_capture".into());
         return Ok(Captured {
@@ -247,9 +272,13 @@ fn capture_window(
             change_ms: None,
             popups: popup_json,
             window: Some(geo),
+            target,
+            crop,
         });
     }
 
+    let src = crop.map_or((frame.w, frame.h), |c| (c.w, c.h));
+    let opts = &with_baseline(opts, baseline, target, crop, src)?;
     let spec = CropSpec::WindowFrame {
         frame,
         window: wr,
@@ -272,6 +301,8 @@ fn capture_window(
         change_ms: None,
         popups: popup_json,
         window: Some(geo),
+        target,
+        crop,
     })
 }
 
@@ -374,7 +405,7 @@ fn save(img: RgbaImage, path: &Path, fmt: Fmt) -> Result<(), SightError> {
             .write_with_encoder(PngEncoder::new(w))
             .map_err(|e| io(&e)),
         Fmt::Jpeg => DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(img).to_rgb8())
-            .write_with_encoder(JpegEncoder::new_with_quality(w, 80))
+            .write_with_encoder(JpegEncoder::new_with_quality(w, baseline::JPEG_QUALITY))
             .map_err(|e| io(&e)),
     }
 }
@@ -409,6 +440,12 @@ pub fn acquire(
             "--min-change-px must be at least 1".into(),
         ));
     }
+    let expect_change = expect_change || args.baseline.is_some();
+    let loaded = args
+        .baseline
+        .as_deref()
+        .map(|p| Loaded::load(p, warnings))
+        .transpose()?;
     let min_px = args.min_change_px.unwrap_or(if expect_change {
         DEFAULT_MIN_CHANGE_PX
     } else {
@@ -423,6 +460,8 @@ pub fn acquire(
     );
 
     let mut cap = if let Some(Region(r)) = &args.region {
+        let target = TargetId::Region { rect: *r };
+        let opts = with_baseline(&opts, loaded.as_ref(), target, None, (r.w, r.h))?;
         let (img, settled) = capture::grab_region(*r, &opts, warnings)?;
         if win::spans_mixed_dpi(r) {
             warnings.push("region_spans_mixed_dpi".into());
@@ -439,6 +478,8 @@ pub fn acquire(
             change_ms: None,
             popups: Vec::new(),
             window: None,
+            target,
+            crop: None,
         }
     } else {
         let hwnd = match (args.hwnd, args.pid) {
@@ -446,7 +487,13 @@ pub fn acquire(
             (None, Some(pid)) => pick_pid_window(pid, warnings)?,
             (None, None) => unreachable!("validated above"),
         };
-        capture_window(hwnd, args.crop.as_ref().map(|c| c.0), &opts, warnings)?
+        capture_window(
+            hwnd,
+            args.crop.as_ref().map(|c| c.0),
+            loaded.as_ref(),
+            &opts,
+            warnings,
+        )?
     };
     cap.change_ms = opts.change_ms();
     cap.changed = cap.change_ms.is_some();
@@ -481,19 +528,27 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
         let out_long = f64::from(ow.max(oh));
         ((out_long / long) * 10000.0).round() / 10000.0
     };
+    // The same resize `--baseline` applies to live frames, so they compare equal.
     let img = if (ow, oh) == (sw, sh) {
         cap.img
     } else {
-        let filter = if s > 1.0 {
-            FilterType::Nearest
-        } else {
-            FilterType::Lanczos3
-        };
-        image::imageops::resize(&cap.img, ow, oh, filter)
+        baseline::resize(&cap.img, ow, oh)
     };
 
     let (path, fmt) = choose_output(args)?;
     save(img, &path, fmt)?;
+    // Sidecar for later `--baseline` use; a failure only costs that convenience.
+    let meta = Meta {
+        v: 1,
+        target: cap.target,
+        crop: cap.crop,
+        source: Size { w: sw, h: sh },
+        image: Size { w: ow, h: oh },
+        format: if fmt == Fmt::Png { "png" } else { "jpeg" }.into(),
+    };
+    if baseline::write_meta(&path, &meta).is_err() {
+        warnings.push("baseline_metadata_not_written".into());
+    }
 
     let m = cap.maps_to;
     let sc = fmt_num(reported);
@@ -526,7 +581,7 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
     } else {
         Err(Box::new(ShotFail {
             err: SightError::Timeout(timeout_message(
-                args.expect_change,
+                args.expect_change || args.cap.baseline.is_some(),
                 cap.changed,
                 args.cap.timeout,
                 "saved the latest frame anyway",

@@ -1,3 +1,4 @@
+mod baseline;
 mod capture;
 mod error;
 mod list;

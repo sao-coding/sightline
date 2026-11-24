@@ -18,6 +18,7 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window;
 
+use crate::baseline::Baseline;
 use crate::error::SightError;
 use crate::win::{self, Rect};
 
@@ -92,6 +93,9 @@ pub struct Opts {
     /// Reference point for `change_ms`.
     pub start: Instant,
     pub deadline: Instant,
+    /// Compare the first frame against this earlier image instead of using it
+    /// as the baseline (implies `expect_change`).
+    pub baseline: Option<Arc<Baseline>>,
     changed: Arc<OnceLock<Instant>>,
 }
 
@@ -109,7 +113,15 @@ impl Opts {
             expect_change,
             start,
             deadline,
+            baseline: None,
             changed: Arc::default(),
+        }
+    }
+
+    pub fn with_baseline(&self, baseline: Option<Arc<Baseline>>) -> Self {
+        Self {
+            baseline,
+            ..self.clone()
         }
     }
 
@@ -168,19 +180,21 @@ struct Handler {
     shared: Arc<Shared>,
     want: Arc<CropSpec>,
     min_px: usize,
+    baseline: Option<Arc<Baseline>>,
     tmp: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
-    type Flags = (Arc<Shared>, Arc<CropSpec>, usize);
+    type Flags = (Arc<Shared>, Arc<CropSpec>, usize, Option<Arc<Baseline>>);
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (shared, want, min_px) = ctx.flags;
+        let (shared, want, min_px, baseline) = ctx.flags;
         Ok(Self {
             shared,
             want,
             min_px,
+            baseline,
             tmp: Vec::new(),
         })
     }
@@ -227,12 +241,18 @@ impl GraphicsCaptureApiHandler for Handler {
                 l.first_change.get_or_insert(now);
             }
             None => {
+                // With a baseline image, the first frame may already be a change.
+                let first_change = self
+                    .baseline
+                    .as_ref()
+                    .filter(|b| b.diff(data, crop.w as u32, crop.h as u32) >= self.min_px)
+                    .map(|_| now);
                 *latest = Some(Latest {
                     bgra: data.to_vec(),
                     crop,
                     origin,
                     changed_at: now,
-                    first_change: None,
+                    first_change,
                 });
             }
         }
@@ -269,7 +289,12 @@ fn border_setting() -> DrawBorderSettings {
 /// image is kept (`opts.change_ms()` tells whether a change was seen).
 pub fn grab(source: &Source, crop: CropSpec, opts: &Opts) -> Result<Grab, SightError> {
     let shared = Arc::new(Shared::default());
-    let flags = (shared.clone(), Arc::new(crop), opts.min_change_px);
+    let flags = (
+        shared.clone(),
+        Arc::new(crop),
+        opts.min_change_px,
+        opts.baseline.clone(),
+    );
     macro_rules! start {
         ($item:expr) => {
             Handler::start_free_threaded(Settings::new(
@@ -384,11 +409,29 @@ pub fn grab_region(
             region.x, region.y, region.w, region.h
         )));
     }
+    // Each monitor part compares against its own slice of the baseline.
+    let part_opts = parts
+        .iter()
+        .map(|&(_, inter, _)| {
+            let rel = Rect {
+                x: inter.x - region.x,
+                y: inter.y - region.y,
+                w: inter.w,
+                h: inter.h,
+            };
+            opts.baseline
+                .as_ref()
+                .map(|b| b.sub(rel))
+                .transpose()
+                .map(|b| opts.with_baseline(b))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let results: Vec<Result<Grab, SightError>> = std::thread::scope(|s| {
         let handles: Vec<_> = parts
             .iter()
-            .map(|&(hmon, _, local)| {
-                s.spawn(move || grab(&Source::Monitor(hmon), CropSpec::Rect(local), opts))
+            .zip(&part_opts)
+            .map(|(&(hmon, _, local), o)| {
+                s.spawn(move || grab(&Source::Monitor(hmon), CropSpec::Rect(local), o))
             })
             .collect();
         handles

@@ -31,6 +31,7 @@
 | `--hwnd <HWND>` | | 擷取這個視窗（十進位，與 `list` 輸出相同） |
 | `--region x,y,w,h` | | 螢幕區域，實體像素；真正的螢幕擷取，蓋在上面的東西都會被截進去 |
 | `--crop x,y,w,h` | | 只保留這個矩形，座標相對於視窗 DWM 邊框的左上角，實體像素。僅限 `--pid` / `--hwnd`（與 `--region` 併用，或超出視窗，都會回傳 `INVALID_ARGS`，`hint` 會給出視窗大小）。先於 `--scale` 與 `--max-edge` 套用 |
+| `--baseline <image>` | | 與這張更早的截圖（它的 `data.path`）比較，而不是與第一幀比較。隱含 `--expect-change`。見[基準圖](#基準圖) |
 | `--scale <F>` | `1.0` | 縮放倍率，範圍 (0, 16]。大於 1 時用最近鄰內插，並輸出 PNG |
 | `--max-edge <N>` | `1568` | 縮小到長邊不超過 N 像素。**`0` 表示不縮小**（1:1 像素） |
 | `--expect-change` | 關閉 | 以第一幀為基準，等畫面與它出現差異，之後再套用 `--settle`。適合在外部點擊或按鍵之後立刻使用 |
@@ -55,9 +56,28 @@ JPEG 品質為 80。視窗擷取（`--pid` / `--hwnd`）另外會回傳 `popups`
 
 基準是擷取到的第一幀，它在 `sight` 啟動後約 0.3 秒才抵達（擷取工作階段啟動耗時）。在那之前就已完成的變化不會被看到：`TIMEOUT` 且 `changed:false` 可能代表 UI 其實已經更新，這時用一般的 `shot` 看一眼即可。對反應是瞬間的 UI，只用 `--settle`，或在操作之前一刻再啟動指令。
 
+#### 基準圖
+
+`--baseline <image>` 用你之前截的一張圖取代「第一幀」，這樣即使變化在 `sight` 啟動之前就已完成，也能偵測到。符合實際的順序：
+
+```
+> sight shot --hwnd 11736012 --out before.png
+# 操作：UI 瞬間就變了
+> sight wait --hwnd 11736012 --baseline before.png --settle 300
+{"v":1,"ok":true,"data":{"changed":true,"change_ms":318,"settled":true,"elapsed_ms":502},"warnings":[]}
+> sight wait --hwnd 11736012 --change --timeout 1500      # 同樣的順序，沒有基準圖
+{"v":1,"ok":false,"error":{"code":"TIMEOUT","message":"no change detected within --timeout 1500ms (no image saved)",...},"data":{"changed":false,"change_ms":null,"settled":false,"elapsed_ms":1534}}
+```
+
+擷取到的第一幀會與這張圖比較；若至少有 `--min-change-px` 個像素不同，就立刻算作變化（此時 `change_ms` 約等於第一幀抵達的時間），然後照常套用 `--settle`。若一致，則像 `--expect-change` 那樣繼續等待之後的變化。
+
+- **必須可比較。** 每次 `shot` 都會在圖片旁寫一個旁置檔 `<name>.sight.json`（取代副檔名），記錄目標（`window` + `hwnd`，或 `region` + 矩形）、相對於視窗的 `crop`、裁切後縮放前的像素大小（`source`）、儲存大小（`image`）與 `format`。`--baseline` 會拿它與新的擷取核對：目標或 `--crop` 不同、裁切後縮放前的像素大小不同（包括視窗被調整過大小：請重新截基準圖），或圖片與旁置檔不再一致時，回傳帶 `hint` 的 `INVALID_ARGS`。只移動視窗、不改大小是沒問題的，因為裁切和比較都是相對於視窗的。不是 sight 截的圖（沒有旁置檔）會被當作未縮放的 1:1 影像，並給出警告 `baseline_without_metadata`。
+- **JPEG 與縮放過的基準圖不需要容差。** `shot` 預設存 JPEG（品質 80），預設的 `--max-edge` 也會縮小大視窗。這裡不做模糊比對，而是把即時幀先經過與 `shot` 相同的縮放、相同的 JPEG 編碼/解碼再比較，所以相同的像素必然完全相等。`--max-edge 0` 的 `.png` 仍然最省（不用逐幀轉換）。唯一的例外：縮放過或 JPEG 的基準圖不能用於跨多個螢幕或超出螢幕邊緣的 `--region`（或彈出視窗的螢幕擷取後備），那會回傳 `INVALID_ARGS`，請改用 `--max-edge 0` 的 `.png`。
+- 其他警告：`baseline_metadata_unreadable`、`baseline_metadata_not_written`（旁置檔寫不出來）。
+
 ### `wait`
 
-目標、`--crop`、`--settle`、`--timeout`、`--min-change-px` 參數與 `shot` 相同，等待邏輯也相同，但**不儲存影像**。`--change` 即 `--expect-change`。代理需要在下一次點擊前確認 UI 已就緒時使用它。
+目標、`--crop`、`--settle`、`--timeout`、`--min-change-px`、`--baseline` 參數與 `shot` 相同，等待邏輯也相同，但**不儲存影像**。`--change` 即 `--expect-change`。代理需要在下一次點擊前確認 UI 已就緒時使用它。
 
 ```
 > sight wait --hwnd 11736012 --change --settle 300
@@ -160,7 +180,7 @@ screen_y = 278 + 200 / 0.9273 ≈ 278 + 215.7 = 494
 | 錯誤碼 | 結束代碼 | 意義 | `hint` |
 |---|---|---|---|
 | （成功） | 0 | | |
-| `INVALID_ARGS` | 1 | 參數錯誤或互相衝突（含解析錯誤）、`--crop` 與 `--region` 併用、`--crop` 超出視窗 | run `sight --help` for usage（`--crop` 出錯時 `hint` 給出視窗大小） |
+| `INVALID_ARGS` | 1 | 參數錯誤或互相衝突（含解析錯誤）、`--crop` 與 `--region` 併用、`--crop` 超出視窗、`--baseline` 讀不出或不可比較 | run `sight --help` for usage（`--crop` 出錯時 `hint` 給出視窗大小） |
 | `TARGET_NOT_FOUND` | 2 | 找不到該 pid / hwnd / 可見視窗 | run `sight list` to see available targets |
 | `WINDOW_MINIMIZED` | 3 | 目標視窗已最小化 | restore the window and retry |
 | `WINDOW_PROTECTED` | 3 | 視窗禁止被擷取，不要重試 | the window opted out of capture (display affinity) |

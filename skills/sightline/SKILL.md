@@ -41,7 +41,7 @@ Check it works with `sight doctor`.
 
 ### `shot`: screenshot
 
-`sight shot (--pid N | --hwnd N | --region x,y,w,h) [--expect-change] [--settle ms] [--min-change-px N] [--crop x,y,w,h] [--scale F] [--max-edge N] [--timeout ms] [--out path]`
+`sight shot (--pid N | --hwnd N | --region x,y,w,h) [--expect-change] [--settle ms] [--min-change-px N] [--crop x,y,w,h] [--baseline image] [--scale F] [--max-edge N] [--timeout ms] [--out path]`
 
 Exactly one target:
 
@@ -58,6 +58,7 @@ Options:
 | `--settle ms` | off | wait until the image has not changed for this many ms (bounded by `--timeout`). Use ~300 after an action so animations finish |
 | `--expect-change` | off | take the first frame as a baseline and wait until pixels differ from it, **then** apply `--settle`. Use right after an external click or keypress: plain `--settle` can return the old frame because the UI has not started changing yet. Both phases share `--timeout` |
 | `--min-change-px N` | 16 with `--expect-change`, else 1 (exact) | how many pixels must differ to count as a change; ignores a blinking caret. With N > 1 a smaller difference can be missing from the saved image |
+| `--baseline image` | none | compare against this earlier shot (its `data.path`) instead of the first frame, so a change that finished before `sight` started still counts. Implies `--expect-change`. See *Baselines* below |
 | `--crop x,y,w,h` | none | keep only this rect, relative to the window's DWM frame top-left, in physical px. `--hwnd`/`--pid` only (`INVALID_ARGS` with `--region`, or when it falls outside the window; the hint gives the window size). Applied before `--scale`/`--max-edge`, so `--crop ... --max-edge 0` gives exactly w×h pixels. Works wherever the window is |
 | `--timeout ms` | 5000 | overall timeout, shared by the change and settle phases |
 | `--scale F` | 1 | resize factor, must be in (0,16]; nearest neighbour when > 1; a scale > 1 writes PNG |
@@ -74,7 +75,7 @@ Options:
 
 ### `wait`: UI ready, no image
 
-`sight wait (--hwnd N | --pid N | --region x,y,w,h) [--change] [--settle ms] [--timeout ms] [--min-change-px N] [--crop x,y,w,h]`
+`sight wait (--hwnd N | --pid N | --region x,y,w,h) [--change] [--settle ms] [--timeout ms] [--min-change-px N] [--crop x,y,w,h] [--baseline image]`
 
 Same logic and flags as `shot` (`--change` is `--expect-change`), but nothing is saved. Use it when you need the UI ready before your next click, not a picture. Output: `changed`, `change_ms`, `settled`, `elapsed_ms`.
 
@@ -85,7 +86,23 @@ Same logic and flags as `shot` (`--change` is `--expect-change`), but nothing is
 
 Use `--crop` on `wait` to watch only the part of the window that should change.
 
-**Limit of `--expect-change` / `--change`.** The baseline is the first captured frame, which arrives about 0.3 s after `sight` starts. A change that finished before then is not seen, so `TIMEOUT` with `changed:false` can mean "already updated": take a plain `shot` and look. For UI that reacts instantly, use `--settle` alone, or start `wait --change` just before you act.
+**Limit of `--expect-change` / `--change`.** The baseline is the first captured frame, which arrives about 0.3 s after `sight` starts. A change that finished before then is not seen, so `TIMEOUT` with `changed:false` can mean "already updated": take a plain `shot` and look, or use `--baseline`.
+
+#### Baselines: catch changes that finish before `sight` starts
+
+Take a shot *before* acting, act, then wait against that shot:
+
+```
+sight shot --hwnd H --out before.png
+# act with your own tool
+sight wait --hwnd H --baseline before.png --settle 300
+```
+
+The first frame is compared with the image, so an instant UI reaction still gives `changed:true` (`change_ms` is then about the first frame time, 300 ms or so). Without `--baseline` the same order gives a false `TIMEOUT` with `changed:false`.
+
+- Must be the same target (the same window, or the same `--region`) and the same `--crop`. The window may have moved but must not have been resized. Every shot writes a sidecar `<name>.sight.json` (target, crop, pixel size before scaling, saved size, format) that is checked; a mismatch is `INVALID_ARGS` with a hint, never a silent wrong comparison. A foreign image without a sidecar is assumed to be unscaled.
+- Default JPEG shots and downscaled shots work: the live frame goes through the same resize and JPEG encode as `shot`, so equal pixels compare equal and no tolerance is needed. Exception: a scaled or JPEG baseline cannot be used for a `--region` (or popup screen capture) that spans several monitors; take that baseline as `.png` with `--max-edge 0`.
+- Warnings: `baseline_without_metadata`, `baseline_metadata_unreadable`, `baseline_metadata_not_written` (the shot could not write its sidecar).
 
 ### `stat`: CPU and memory
 
@@ -136,7 +153,7 @@ Exit codes: 0 ok, 1 INVALID_ARGS, 2 TARGET_NOT_FOUND, 3 WINDOW_MINIMIZED / WINDO
 
 | Code | Exit | Do |
 |---|---|---|
-| `INVALID_ARGS` | 1 | Fix flags: exactly one of `--pid`/`--hwnd`/`--region`; scale in (0,16]; duration/interval > 0; `--crop` only with `--pid`/`--hwnd` and inside the window (the hint gives the window size). Also returned for bad CLI syntax. |
+| `INVALID_ARGS` | 1 | Fix flags (`--baseline` must match the target, `--crop` and window size of this capture; the hint says how to retake it): exactly one of `--pid`/`--hwnd`/`--region`; scale in (0,16]; duration/interval > 0; `--crop` only with `--pid`/`--hwnd` and inside the window (the hint gives the window size). Also returned for bad CLI syntax. |
 | `TARGET_NOT_FOUND` | 2 | The pid/hwnd is gone or has no visible window. Run `list` again. |
 | `WINDOW_MINIMIZED` | 3 | Restore the window with your own tool, then retry. |
 | `WINDOW_PROTECTED` | 3 | The window opted out of capture. Do not retry; tell the user. |
