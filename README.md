@@ -52,6 +52,7 @@ costs one file read instead of thousands of tokens.
 | `list` | Which windows exist, and which PID / HWND do I target? | Rect, monitor, DPI, minimized state; noisy windows hidden by default |
 | `shot` | What does this window look like now? | Covered windows, popups, change and settle wait, window-relative `--crop`, coordinate formulas |
 | `wait` | Has the UI changed and settled after my action? | Same waiting as `shot`, no image; `changed`, `change_ms`, `settled` |
+| `rec` | Show me what happened: an animated GIF | Window, crop or region to GIF; merges identical frames; `--until-settled`, `--keyframes` stills |
 | `stat` | How much CPU and RAM over time? | Whole process tree (Electron, browsers, games); private bytes |
 | `doctor` | What monitors and DPI scales does this machine have? | First stop when something looks off |
 
@@ -155,6 +156,23 @@ One turn of the agent loop:
    ```
 
    One full core (`cpu_core_pct` ≈ 100) out of 16 (`cpu_total_pct` ≈ 6.3): a busy loop.
+
+### Recording a GIF
+
+`sight rec` records a window or region for README demos and test evidence. It blocks until it is
+done, so run it in the background while you act:
+
+```powershell
+$job = Start-Job { sight rec --hwnd 123456 --duration 10000 --until-settled 500 --keyframes 3 --out C:\tmp\demo.gif }
+Start-Sleep -Milliseconds 500      # capture needs ~0.3 s to start
+# ... act with your own tool (click, type) ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json   # data.path, data.keyframes[].path
+```
+
+The result has `frames`, `fps`, `duration_ms`, `size_bytes` and the same coordinate formulas as
+`shot`. Identical frames are merged (a static window is one long frame), and `--keyframes 3` also
+saves PNG stills of the biggest changes so an agent can check the recording without decoding the
+GIF. Defaults: `--fps 10` (max 30), `--max-edge 800`.
 
 ### Coordinates: pick the origin your input tool uses
 

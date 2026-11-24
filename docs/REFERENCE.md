@@ -125,6 +125,61 @@ needs the UI ready before its next click.
 Output: `changed`, `change_ms`, `settled`, `elapsed_ms`. Use `--crop` to watch only the part of the
 window that should change.
 
+### `rec`
+
+Record a window or region to an animated GIF, for README demos and test evidence. Exactly one of
+`--pid`, `--hwnd`, `--region` is required, as for `shot`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--duration <ms>` | required | Recording length, counted from the first captured frame |
+| `--fps <N>` | `10` | Sampling rate, 1 to 30 |
+| `--max-edge <N>` | `800` | Downscale so the long edge is at most N px (`0` = full size) |
+| `--until-settled <ms>` | off | Stop once the image changed and then stayed unchanged for this long (never longer than `--duration`) |
+| `--keyframes <N>` | `0` | Also save N PNG stills of the most changed moments |
+| `--crop x,y,w,h` | | Window-relative crop, as for `shot` (`--pid` / `--hwnd` only) |
+| `--out <path>` | temp dir | GIF path. Default `%TEMP%\sightline\rec-<timestamp>.gif`; stills are `<name>-key1.png`, ... next to it |
+
+`rec` **blocks** until the recording is done, so agents run it in the background while they act
+(see below). It uses the same Windows Graphics Capture sessions as `shot`, including the popup
+screen-capture fallback and multi-monitor regions.
+
+- **Frames.** The image is sampled at `--fps`; a frame is written only when pixels changed, and an
+  unchanged stretch just extends the previous frame's delay. A static window records one frame with a
+  long delay. Delays are whole centiseconds (the GIF unit) taken from a running timeline, and a busy
+  machine can deliver fewer frames than `--fps`.
+- **Timing.** The clock starts at the first captured frame (capture start-up takes about 0.3 s), so
+  `elapsed_ms` is about 0.7 s longer than `duration_ms`.
+- **`--until-settled`** arms at the first change after the first frame. A window that is static when
+  recording starts does not end it; if nothing ever changes, the full `--duration` is recorded.
+- **Output.** `path`, `frames`, `fps`, `duration_ms` (the GIF's own length), `image`, `size_bytes`,
+  `stopped` (`duration` or `settled`), `elapsed_ms`, and the same `maps_to`, `scale`, `dpi_scale`,
+  `monitor_dpi_scale`, `formula`, and for windows `window`, `formula_window`, `formula_client`,
+  `popups` as `shot`. They map GIF pixels (and keyframe pixels) to coordinates as of the start of the
+  recording. With `--keyframes N`, `keyframes` lists `{t_ms, path}`: the first frame, the last frame
+  and the frames with the biggest change in between (N in total, fewer when fewer distinct frames
+  exist), in time order; `t_ms` counts from the start of the GIF.
+- **Warnings.** `gif_large` (over about 10 MB), `window_resized_during_recording` (later frames are
+  cropped or padded to the first frame's size), plus the `shot` ones.
+- **Limits.** Popups are detected once, when recording starts: a menu that opens later is not in a
+  window recording (record a `--region` for that). The window position in the formulas is the one at
+  start.
+
+```
+> sight rec --hwnd 11736012 --duration 4000 --keyframes 3 --out demo.gif
+{"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\rec-20261124-161200-100.gif","frames":22,"fps":10,"duration_ms":4000,"image":{"w":642,"h":452},"size_bytes":597570,"maps_to":{"space":"screen_physical","x":207,"y":150,"w":642,"h":452},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 207 + px / 1.0; screen_y = 150 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 0 + px / 1.0; win_y = 0 + py / 1.0","formula_client":"client_x = -1 + px / 1.0; client_y = -31 + py / 1.0","stopped":"duration","elapsed_ms":4504,"popups":[],"keyframes":[{"t_ms":1,"path":"...\\rec-20261124-161200-100-key1.png"},{"t_ms":1500,"path":"...\\rec-20261124-161200-100-key2.png"},{"t_ms":2700,"path":"...\\rec-20261124-161200-100-key3.png"}]},"warnings":[]}
+```
+
+Running it in the background while acting (it needs about 0.3 s to start; wait ~0.5 s before the first
+action):
+
+```powershell
+$job = Start-Job { sight rec --hwnd 123456 --duration 10000 --until-settled 500 --keyframes 3 --out C:\tmp\demo.gif }
+Start-Sleep -Milliseconds 500      # capture needs ~0.3 s to start
+# ... act with your own tool (click, type) ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json   # data.path, data.keyframes[].path
+```
+
 ### `stat`
 
 Sample CPU and memory of a process and, by default, all its descendants.

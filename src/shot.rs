@@ -16,9 +16,9 @@ use crate::error::SightError;
 use crate::win::{self, Rect, WinInfo};
 
 #[derive(Clone, Debug)]
-pub struct Region(Rect);
+pub struct Region(pub Rect);
 
-fn parse_region(s: &str) -> Result<Region, String> {
+pub fn parse_region(s: &str) -> Result<Region, String> {
     let p: Vec<&str> = s.split(',').collect();
     if p.len() != 4 {
         return Err("expected x,y,w,h".into());
@@ -109,9 +109,9 @@ impl From<SightError> for Box<ShotFail> {
 }
 
 /// Window geometry in screen physical px (window sources only).
-struct WindowGeo {
-    frame: Rect,
-    client: Option<Rect>,
+pub struct WindowGeo {
+    pub frame: Rect,
+    pub client: Option<Rect>,
 }
 
 pub struct Captured {
@@ -195,13 +195,32 @@ fn with_baseline(
     Ok(opts.with_baseline(Some(b)))
 }
 
-fn capture_window(
+/// How a window target is captured.
+pub enum How {
+    /// Screen capture of this region (popups present, or a cropped area).
+    Region(Rect),
+    /// Window capture (Windows Graphics Capture).
+    Frame(CropSpec),
+}
+
+/// Everything decided about a window capture before any frame is taken.
+pub struct WinPlan {
+    pub how: How,
+    /// Pixel size after the crop, before scaling.
+    pub source: (i32, i32),
+    pub dpi_scale: f64,
+    pub monitor_dpi_scale: f64,
+    pub geo: WindowGeo,
+    pub popups: Vec<Value>,
+}
+
+/// Validate the window, apply `--crop` and decide between window capture and the
+/// popup screen-capture fallback.
+pub fn plan_window(
     hwnd: u64,
     crop: Option<Rect>,
-    baseline: Option<&Loaded>,
-    opts: &Opts,
     warnings: &mut Vec<String>,
-) -> Result<Captured, SightError> {
+) -> Result<WinPlan, SightError> {
     let all = win::enum_windows();
     let info = all
         .iter()
@@ -221,7 +240,6 @@ fn capture_window(
         )));
     }
 
-    let target = TargetId::Window { hwnd };
     let crop_screen = crop.map(|c| crop_to_screen(c, frame)).transpose()?;
     let geo = WindowGeo {
         frame,
@@ -254,60 +272,77 @@ fn capture_window(
         .iter()
         .map(|(w, why)| json!({"hwnd": w.hwnd, "class": w.class, "via": why}))
         .collect();
-    if !popups.is_empty() {
+    let (how, source) = if popups.is_empty() {
+        let spec = CropSpec::WindowFrame {
+            frame,
+            window: wr,
+            sub: crop,
+        };
+        (
+            How::Frame(spec),
+            crop.map_or((frame.w, frame.h), |c| (c.w, c.h)),
+        )
+    } else {
         // With --crop the screen region is exactly the translated crop rect, so
         // the crop keeps meaning the same window-relative area.
         let region =
             crop_screen.unwrap_or_else(|| popups.iter().fold(frame, |u, (p, _)| u.union(&p.rect)));
-        let opts = &with_baseline(opts, baseline, target, crop, (region.w, region.h))?;
-        let (img, settled) = capture::grab_region(region, opts, warnings)?;
         warnings.push("popups_included_via_screen_capture".into());
-        return Ok(Captured {
-            img,
-            maps_to: region,
-            dpi_scale: info.dpi_scale,
-            monitor_dpi_scale: info.monitor_dpi_scale,
-            settled,
-            changed: false,
-            change_ms: None,
-            popups: popup_json,
-            window: Some(geo),
-            target,
-            crop,
-        });
-    }
-
-    let src = crop.map_or((frame.w, frame.h), |c| (c.w, c.h));
-    let opts = &with_baseline(opts, baseline, target, crop, src)?;
-    let spec = CropSpec::WindowFrame {
-        frame,
-        window: wr,
-        sub: crop,
+        (How::Region(region), (region.w, region.h))
     };
-    let g = capture::grab(&Source::Window(hwnd), spec, opts)?;
-    let maps_to = Rect {
-        x: g.origin.0 + g.crop.x,
-        y: g.origin.1 + g.crop.y,
-        w: g.crop.w,
-        h: g.crop.h,
-    };
-    Ok(Captured {
-        img: g.img,
-        maps_to,
+    Ok(WinPlan {
+        how,
+        source,
         dpi_scale: info.dpi_scale,
         monitor_dpi_scale: info.monitor_dpi_scale,
-        settled: g.settled,
+        geo,
+        popups: popup_json,
+    })
+}
+
+fn capture_window(
+    hwnd: u64,
+    crop: Option<Rect>,
+    baseline: Option<&Loaded>,
+    opts: &Opts,
+    warnings: &mut Vec<String>,
+) -> Result<Captured, SightError> {
+    let plan = plan_window(hwnd, crop, warnings)?;
+    let target = TargetId::Window { hwnd };
+    let opts = &with_baseline(opts, baseline, target, crop, plan.source)?;
+    let (img, maps_to, settled) = match plan.how {
+        How::Region(region) => {
+            let (img, settled) = capture::grab_region(region, opts, warnings)?;
+            (img, region, settled)
+        }
+        How::Frame(spec) => {
+            let g = capture::grab(&Source::Window(hwnd), spec, opts)?;
+            let maps_to = Rect {
+                x: g.origin.0 + g.crop.x,
+                y: g.origin.1 + g.crop.y,
+                w: g.crop.w,
+                h: g.crop.h,
+            };
+            (g.img, maps_to, g.settled)
+        }
+    };
+    Ok(Captured {
+        img,
+        maps_to,
+        dpi_scale: plan.dpi_scale,
+        monitor_dpi_scale: plan.monitor_dpi_scale,
+        settled,
         changed: false,
         change_ms: None,
-        popups: popup_json,
-        window: Some(geo),
+        popups: plan.popups,
+        window: Some(plan.geo),
         target,
         crop,
     })
 }
 
 /// Pick the largest visible window of a pid; the rest become warnings.
-fn pick_pid_window(pid: u32, warnings: &mut Vec<String>) -> Result<u64, SightError> {
+pub fn pick_pid_window(pid: u32, warnings: &mut Vec<String>) -> Result<u64, SightError> {
     let all: Vec<WinInfo> = win::enum_windows()
         .into_iter()
         .filter(|w| w.pid == pid && w.visible && !w.cloaked && !(w.rect.is_empty() && !w.minimized))
@@ -345,7 +380,7 @@ fn pick_pid_window(pid: u32, warnings: &mut Vec<String>) -> Result<u64, SightErr
     Ok(best.hwnd)
 }
 
-fn fmt_num(v: f64) -> String {
+pub fn fmt_num(v: f64) -> String {
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0');
     if s.ends_with('.') {
@@ -361,7 +396,7 @@ enum Fmt {
     Jpeg,
 }
 
-fn timestamp() -> String {
+pub fn timestamp() -> String {
     let t = unsafe { GetLocalTime() };
     format!(
         "{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}",
@@ -559,16 +594,8 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
         "scale": reported,
         "dpi_scale": cap.dpi_scale,
         "monitor_dpi_scale": cap.monitor_dpi_scale,
-        "formula": formula("screen", m.x, m.y, &sc),
     });
-    if let Some(g) = &cap.window {
-        // Same image px -> other origins: the frame's and the client area's.
-        data["window"] = window_json(g);
-        data["formula_window"] = json!(formula("win", m.x - g.frame.x, m.y - g.frame.y, &sc));
-        if let Some(c) = &g.client {
-            data["formula_client"] = json!(formula("client", m.x - c.x, m.y - c.y, &sc));
-        }
-    }
+    add_formulas(&mut data, m, &sc, cap.window.as_ref());
     data["settled"] = json!(cap.settled);
     data["changed"] = json!(cap.changed);
     data["change_ms"] = json!(cap.change_ms);
@@ -593,6 +620,21 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
 }
 
 /// `{prefix}_x = {ox} + px / {sc}; {prefix}_y = {oy} + py / {sc}`
+/// Add `formula` (screen) and, for window targets, `window`, `formula_window`
+/// and `formula_client`: how image px map to each origin. `m` is what the image
+/// covers on screen, `sc` the formatted px-per-screen-px scale.
+pub fn add_formulas(data: &mut Value, m: Rect, sc: &str, window: Option<&WindowGeo>) {
+    data["formula"] = json!(formula("screen", m.x, m.y, sc));
+    if let Some(g) = window {
+        // Same image px -> other origins: the frame's and the client area's.
+        data["window"] = window_json(g);
+        data["formula_window"] = json!(formula("win", m.x - g.frame.x, m.y - g.frame.y, sc));
+        if let Some(c) = &g.client {
+            data["formula_client"] = json!(formula("client", m.x - c.x, m.y - c.y, sc));
+        }
+    }
+}
+
 fn formula(prefix: &str, ox: i32, oy: i32, sc: &str) -> String {
     format!("{prefix}_x = {ox} + px / {sc}; {prefix}_y = {oy} + py / {sc}")
 }

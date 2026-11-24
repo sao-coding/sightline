@@ -19,6 +19,7 @@ Screenshots are saved to a file; you get `data.path` (an image path), **never ba
   - `--crop x,y,w,h`: window-relative rect (see below); `--hwnd`/`--pid` only (`INVALID_ARGS` with `--region`). Applied before `--scale`/`--max-edge`, so `--crop ... --max-edge 0` is exact 1:1 pixels.
   - Output always has `settled`, `changed`, `change_ms` (ms from command start to the first change, or `null`), `elapsed_ms`.
 - `wait (--hwnd N | --pid N | --region x,y,w,h) [--change] [--settle ms] [--timeout ms] [--min-change-px N] [--crop x,y,w,h] [--baseline image]`: same waiting as `shot`, but **saves no image**. Output `{changed, change_ms, settled, elapsed_ms}`. Use it to know the UI is ready for your next click.
+- `rec (--hwnd N | --pid N | --region x,y,w,h) [--crop x,y,w,h] --duration ms [--fps N] [--max-edge N] [--until-settled ms] [--keyframes N] [--out path.gif]`: record an animated GIF (README demos, test evidence). **Blocks** until `--duration` ms (counted from the first frame; wall time is about 0.7 s more) has passed, or with `--until-settled` until the image changed and then stayed unchanged for that many ms. `--fps` default 10 (max 30), `--max-edge` default 800 (0 = full size). Identical frames are merged into one longer frame. Output: `path`, `frames`, `fps`, `duration_ms`, `image {w,h}`, `size_bytes`, `stopped` (`duration`/`settled`), the same `maps_to`/`formula`/`formula_window`/`formula_client` as `shot` (valid for every frame; the window position is the one at start), and with `--keyframes N` also `keyframes:[{t_ms, path}]`: N PNG stills (first, last and the biggest changes) so you can check the recording without decoding the GIF (`t_ms` is from the start of the GIF). Warning `gif_large` above about 10 MB. Popups are detected when recording starts only; for menus that open mid-recording use `--region`.
 - `stat --pid N --duration ms [--interval ms] [--no-tree]`: CPU and memory over time, includes child processes unless `--no-tree`. Use for perf/leak checks. `cpu_core_pct` 100 = one core; `mem_mb` is private bytes.
 - `doctor`: lists monitors (`index`, `rect`, `dpi_scale`, `primary`); run when you get `INTERNAL`.
 
@@ -40,6 +41,19 @@ sight wait --hwnd H --baseline before.png --settle 300   # 3. changed:true even 
 ```
 
 The first frame is compared with the baseline image, so a change that completed before `sight` started still counts (`change_ms` is then about the first frame time). Rules: same target (`--hwnd`/`--pid` window or same `--region`), same `--crop`, and the window must not have been resized (moving it is fine). Each shot writes a sidecar `<name>.sight.json` that is checked; any mismatch is `INVALID_ARGS` with a hint, never a silent wrong comparison. JPEG and downscaled baselines work (the live frame goes through the same resize and JPEG encode, so no tolerance is needed); a baseline cannot be a scaled/JPEG image for a `--region`/popup capture that spans several monitors (use `--max-edge 0` and a `.png` there).
+
+## Recording while you act (`rec` blocks)
+
+`rec` returns only when it is finished, so start it in the background, act, then collect the result. It needs about 0.3 s to start capturing: wait ~0.5 s before the first action.
+
+```powershell
+$job = Start-Job { sight rec --hwnd 123456 --duration 10000 --until-settled 500 --keyframes 3 --out C:\tmp\demo.gif }
+Start-Sleep -Milliseconds 500      # capture needs ~0.3 s to start
+# ... act with your own tool (click, type) ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json   # data.path, data.keyframes[].path
+```
+
+Or, without a job: `Start-Process sight -ArgumentList 'rec','--hwnd','123456','--duration','10000','--out','C:\tmp\demo.gif' -NoNewWindow -RedirectStandardOutput C:\tmp\rec.json`, act, then read `C:\tmp\rec.json` after the process exits. `--until-settled` only arms once the image has changed, so a static window at the start does not end the recording; if nothing ever changes the full `--duration` is recorded.
 
 ## Image px -> coordinates (pick the origin your input tool uses)
 

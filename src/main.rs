@@ -3,6 +3,7 @@ mod capture;
 mod error;
 mod list;
 mod output;
+mod rec;
 mod shot;
 mod stat;
 mod wait;
@@ -30,6 +31,8 @@ enum Cmd {
     Shot(shot::ShotArgs),
     /// Wait for the UI to change and/or settle, without saving an image
     Wait(wait::WaitArgs),
+    /// Record a window or region to an animated GIF
+    Rec(rec::RecArgs),
     /// Sample process stats
     Stat(stat::StatArgs),
     /// Check the environment
@@ -71,6 +74,7 @@ fn main() {
         Cmd::List(a) => list::run(a).map_err(Into::into),
         Cmd::Shot(a) => shot::run(a),
         Cmd::Wait(a) => wait::run(a),
+        Cmd::Rec(a) => rec::run(a).map_err(Into::into),
         Cmd::Stat(a) => stat::run(a).map_err(Into::into),
         Cmd::Doctor => doctor().map(|d| (d, Vec::new())).map_err(Into::into),
     };

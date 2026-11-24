@@ -104,6 +104,39 @@ The first frame is compared with the image, so an instant UI reaction still give
 - Default JPEG shots and downscaled shots work: the live frame goes through the same resize and JPEG encode as `shot`, so equal pixels compare equal and no tolerance is needed. Exception: a scaled or JPEG baseline cannot be used for a `--region` (or popup screen capture) that spans several monitors; take that baseline as `.png` with `--max-edge 0`.
 - Warnings: `baseline_without_metadata`, `baseline_metadata_unreadable`, `baseline_metadata_not_written` (the shot could not write its sidecar).
 
+### `rec`: record a GIF
+
+`sight rec (--hwnd N | --pid N | --region x,y,w,h) [--crop x,y,w,h] --duration ms [--fps N] [--max-edge N] [--until-settled ms] [--keyframes N] [--out path.gif]`
+
+Records an animated GIF for README demos or test evidence. It **blocks** until `--duration` ms have passed (counted from the first captured frame, so wall time is about 0.7 s longer), or, with `--until-settled ms`, until the image has changed and then stayed unchanged for that long (never longer than `--duration`).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--duration ms` | required | recording length |
+| `--fps N` | 10 | sampling rate, 1 to 30 |
+| `--max-edge N` | 800 | downscale so the long edge is at most N px; `0` = full size |
+| `--until-settled ms` | off | stop early once the image changed and then stayed unchanged this long. It arms at the first change, so a static window at the start does not end the recording |
+| `--keyframes N` | 0 | also save N PNG stills: first, last and the biggest changes in between |
+| `--crop`, target flags | | same meaning as for `shot` |
+| `--out path` | temp dir `sightline/` | GIF path (stills go next to it as `<name>-keyN.png`) |
+
+Identical frames are merged by extending the previous frame's delay, so a mostly static window gives few frames. `data`: `path`, `frames`, `fps`, `duration_ms` (length of the GIF), `image`, `size_bytes`, `stopped` (`duration` or `settled`), `elapsed_ms`, the same `maps_to`, `scale`, `formula`, `window`, `formula_window`, `formula_client` as `shot` (they map GIF pixels, and keyframe pixels, to coordinates as of the start of recording), and `keyframes:[{t_ms,path}]` when requested (`t_ms` counts from the start of the GIF). Warnings: `gif_large` (over about 10 MB), `window_resized_during_recording`.
+
+```json
+{"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\rec-20261124-161200-100.gif","frames":22,"fps":10,"duration_ms":4000,"image":{"w":642,"h":452},"size_bytes":597570,"maps_to":{"space":"screen_physical","x":207,"y":150,"w":642,"h":452},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 207 + px / 1.0; screen_y = 150 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 0 + px / 1.0; win_y = 0 + py / 1.0","formula_client":"client_x = -1 + px / 1.0; client_y = -31 + py / 1.0","stopped":"duration","elapsed_ms":4504,"popups":[],"keyframes":[{"t_ms":1,"path":"...\\rec-20261124-161200-100-key1.png"},{"t_ms":1500,"path":"...\\rec-20261124-161200-100-key2.png"},{"t_ms":2700,"path":"...\\rec-20261124-161200-100-key3.png"}]},"warnings":[]}
+```
+
+Run it in the background while you act, because it blocks:
+
+```powershell
+$job = Start-Job { sight rec --hwnd 123456 --duration 10000 --until-settled 500 --keyframes 3 --out C:\tmp\demo.gif }
+Start-Sleep -Milliseconds 500      # capture needs ~0.3 s to start
+# ... act with your own tool (click, type) ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json   # data.path, data.keyframes[].path
+```
+
+Or `Start-Process sight -ArgumentList 'rec','--hwnd','123456','--duration','10000','--out','C:\tmp\demo.gif' -NoNewWindow -RedirectStandardOutput C:\tmp\rec.json`, then read `rec.json` once the process has exited. Use `--keyframes` to check the recording without decoding the GIF. Popups are detected when recording starts only; to capture menus that open mid-recording, record a `--region`.
+
 ### `stat`: CPU and memory
 
 `sight stat --pid N --duration ms [--interval ms] [--no-tree]`
@@ -169,6 +202,7 @@ On failure the envelope may still carry `data` (for example the saved image afte
 - **Mixed DPI regions.** Warning `region_spans_mixed_dpi`: the `--region` crosses monitors with different DPI scales.
 - **Popups and menus.** A window with a popup (menu, dropdown) makes `shot` fall back to screen capture (warning `popups_included_via_screen_capture`); `maps_to` is the union rect (with `--crop`, just the cropped rect) and all formulas already account for it. To capture a popup yourself, use `--region` (screen capture).
 - **Minimized windows** cannot be captured (`WINDOW_MINIMIZED`) have no `rect`/`monitor` in `list`. Restore them first.
+- **`rec` blocks.** Run it in the background (see above) and wait ~0.5 s before acting.
 - **Stale formula.** Moving or resizing the window invalidates all three formulas; shoot again. `--crop` is window-relative, so it keeps selecting the same part of the window after a move.
 - **Race after a click.** Plain `--settle` can return the old frame if the UI has not started changing yet; use `--expect-change` / `wait --change`.
 - **`--pid` picks the largest visible window**; when an app has several windows use `list` and `--hwnd`.

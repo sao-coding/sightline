@@ -88,6 +88,43 @@ JPEG 质量为 80。窗口截图（`--pid` / `--hwnd`）还会返回 `popups`（
 
 输出：`changed`、`change_ms`、`settled`、`elapsed_ms`。用 `--crop` 可以只盯窗口里应该发生变化的那一块。
 
+### `rec`
+
+把窗口或屏幕区域录成 GIF 动图，用于 README 演示和测试证据。与 `shot` 一样，`--pid`、`--hwnd`、`--region` 必须且只能指定一个。
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `--duration <ms>` | 必填 | 录制时长，从捕获到第一帧时开始算 |
+| `--fps <N>` | `10` | 采样帧率，1 到 30 |
+| `--max-edge <N>` | `800` | 缩小到长边不超过 N 像素（`0` 表示原尺寸） |
+| `--until-settled <ms>` | 关闭 | 图像发生变化后又连续这么久没变，就提前结束（不会超过 `--duration`） |
+| `--keyframes <N>` | `0` | 另外保存 N 张变化最大时刻的 PNG 静帧 |
+| `--crop x,y,w,h` | | 与 `shot` 相同的相对窗口裁剪（仅限 `--pid` / `--hwnd`） |
+| `--out <path>` | 临时目录 | GIF 路径。默认 `%TEMP%\sightline\rec-<时间戳>.gif`；静帧存为旁边的 `<name>-key1.png` 等 |
+
+`rec` **会阻塞**到录制结束，所以智能体应当在操作的同时让它在后台运行（见下）。它使用与 `shot` 相同的 Windows Graphics Capture 会话，包括弹出窗口的屏幕截图回退和跨显示器区域。
+
+- **帧。** 按 `--fps` 采样；只有像素变化时才写入新帧，没变化的时段只是延长上一帧的延迟。静止的窗口只录出一帧，延迟很长。延迟以厘秒（GIF 的单位）为单位，取自连续的时间线；机器繁忙时实际帧数可能少于 `--fps`。
+- **计时。** 从捕获到第一帧时开始计时（捕获启动约需 0.3 秒），所以 `elapsed_ms` 比 `duration_ms` 大约多 0.7 秒。
+- **`--until-settled`** 在第一帧之后的第一次变化时才开始计时。录制开始时窗口是静止的，不会导致它结束；如果始终没有变化，就录满 `--duration`。
+- **输出。** `path`、`frames`、`fps`、`duration_ms`（GIF 自身的长度）、`image`、`size_bytes`、`stopped`（`duration` 或 `settled`）、`elapsed_ms`，以及与 `shot` 相同的 `maps_to`、`scale`、`dpi_scale`、`monitor_dpi_scale`、`formula`，窗口还有 `window`、`formula_window`、`formula_client`、`popups`。它们把 GIF 像素（和静帧像素）换算成录制开始时的坐标。指定 `--keyframes N` 时，`keyframes` 列出 `{t_ms, path}`：第一帧、最后一帧，以及中间变化最大的帧（共 N 张，不同的帧不够时更少），按时间排序；`t_ms` 从 GIF 开头算起。
+- **警告。** `gif_large`（超过约 10 MB）、`window_resized_during_recording`（之后的帧会按第一帧的大小裁剪或补边），以及 `shot` 的那些警告。
+- **限制。** 弹出窗口只在录制开始时检测一次：之后才打开的菜单不会出现在窗口录像里（这种情况请录 `--region`）。公式里的窗口位置是开始时的位置。
+
+```
+> sight rec --hwnd 11736012 --duration 4000 --keyframes 3 --out demo.gif
+{"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\rec-20261124-161200-100.gif","frames":22,"fps":10,"duration_ms":4000,"image":{"w":642,"h":452},"size_bytes":597570,"maps_to":{"space":"screen_physical","x":207,"y":150,"w":642,"h":452},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 207 + px / 1.0; screen_y = 150 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 0 + px / 1.0; win_y = 0 + py / 1.0","formula_client":"client_x = -1 + px / 1.0; client_y = -31 + py / 1.0","stopped":"duration","elapsed_ms":4504,"popups":[],"keyframes":[{"t_ms":1,"path":"...\\rec-20261124-161200-100-key1.png"},{"t_ms":1500,"path":"...\\rec-20261124-161200-100-key2.png"},{"t_ms":2700,"path":"...\\rec-20261124-161200-100-key3.png"}]},"warnings":[]}
+```
+
+在操作的同时放到后台运行（它启动约需 0.3 秒；第一次操作前先等约 0.5 秒）：
+
+```powershell
+$job = Start-Job { sight rec --hwnd 15603054 --duration 10000 --until-settled 500 --keyframes 3 --out demo.gif }
+Start-Sleep -Milliseconds 500                       # 0.3 s
+# ... act with your own tool ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json
+```
+
 ### `stat`
 
 采样某个进程（默认连同全部子孙进程）的 CPU 和内存。

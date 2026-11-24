@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use image::RgbaImage;
-use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
+use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
 use windows_capture::monitor::Monitor;
@@ -23,6 +23,7 @@ use crate::error::SightError;
 use crate::win::{self, Rect};
 
 /// What part of each frame to keep.
+#[derive(Clone)]
 pub enum CropSpec {
     /// A fixed rect in frame coordinates (monitor capture).
     Rect(Rect),
@@ -151,6 +152,8 @@ struct Latest {
     changed_at: Instant,
     /// When the first frame that differed from the baseline arrived.
     first_change: Option<Instant>,
+    /// Counts accepted frames, so a poller can tell whether anything changed.
+    seq: u64,
 }
 
 #[derive(Default)]
@@ -239,6 +242,7 @@ impl GraphicsCaptureApiHandler for Handler {
                 l.origin = origin;
                 l.changed_at = now;
                 l.first_change.get_or_insert(now);
+                l.seq += 1;
             }
             None => {
                 // With a baseline image, the first frame may already be a change.
@@ -253,6 +257,7 @@ impl GraphicsCaptureApiHandler for Handler {
                     origin,
                     changed_at: now,
                     first_change,
+                    seq: 1,
                 });
             }
         }
@@ -280,6 +285,89 @@ fn border_setting() -> DrawBorderSettings {
     }
 }
 
+/// A running capture session; frames accumulate in `shared`.
+pub struct Session {
+    control: CaptureControl<Handler, String>,
+    shared: Arc<Shared>,
+}
+
+/// A copy of the most recent accepted frame (raw BGRA).
+pub struct FrameCopy {
+    pub bgra: Vec<u8>,
+    pub crop: Rect,
+    pub origin: (i32, i32),
+    /// Changes whenever the pixels changed since the previous copy.
+    pub seq: u64,
+}
+
+impl Session {
+    /// Start capturing `source`, cropped to `crop`; `opts` supplies the change
+    /// threshold and baseline.
+    pub fn start(source: &Source, crop: CropSpec, opts: &Opts) -> Result<Self, SightError> {
+        let shared = Arc::new(Shared::default());
+        let flags = (
+            shared.clone(),
+            Arc::new(crop),
+            opts.min_change_px,
+            opts.baseline.clone(),
+        );
+        macro_rules! start {
+            ($item:expr) => {
+                Handler::start_free_threaded(Settings::new(
+                    $item,
+                    cursor_setting(),
+                    border_setting(),
+                    SecondaryWindowSettings::Default,
+                    MinimumUpdateIntervalSettings::Default,
+                    DirtyRegionSettings::Default,
+                    ColorFormat::Bgra8,
+                    flags,
+                ))
+            };
+        }
+        let control = match source {
+            Source::Window(h) => {
+                start!(Window::from_raw_hwnd(win::hwnd_from_u64(*h).0))
+            }
+            Source::Monitor(h) => {
+                start!(Monitor::from_raw_hmonitor(*h as *mut std::ffi::c_void))
+            }
+        }
+        .map_err(internal)?;
+        Ok(Self { control, shared })
+    }
+
+    /// A failure reported by the capture thread, if any.
+    pub fn error(&self) -> Option<String> {
+        self.shared.error.lock().unwrap().clone()
+    }
+
+    /// Copy of the latest frame, or `None` before the first one arrives.
+    pub fn frame(&self) -> Option<FrameCopy> {
+        let l = self.shared.latest.lock().unwrap();
+        l.as_ref().map(|l| FrameCopy {
+            bgra: l.bgra.clone(),
+            crop: l.crop,
+            origin: l.origin,
+            seq: l.seq,
+        })
+    }
+
+    /// Sequence number of the latest frame (0 before the first); cheap.
+    pub fn seq(&self) -> u64 {
+        self.shared
+            .latest
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |l| l.seq)
+    }
+
+    pub fn stop(self) {
+        let _ = self.control.stop();
+    }
+}
+
 /// Capture `crop` (frame coordinates) from `source`.
 ///
 /// The first frame is the baseline. With `opts.expect_change`, the wait first
@@ -288,36 +376,7 @@ fn border_setting() -> DrawBorderSettings {
 /// long. If `opts.deadline` passes first, `settled` is false but the latest
 /// image is kept (`opts.change_ms()` tells whether a change was seen).
 pub fn grab(source: &Source, crop: CropSpec, opts: &Opts) -> Result<Grab, SightError> {
-    let shared = Arc::new(Shared::default());
-    let flags = (
-        shared.clone(),
-        Arc::new(crop),
-        opts.min_change_px,
-        opts.baseline.clone(),
-    );
-    macro_rules! start {
-        ($item:expr) => {
-            Handler::start_free_threaded(Settings::new(
-                $item,
-                cursor_setting(),
-                border_setting(),
-                SecondaryWindowSettings::Default,
-                MinimumUpdateIntervalSettings::Default,
-                DirtyRegionSettings::Default,
-                ColorFormat::Bgra8,
-                flags,
-            ))
-        };
-    }
-    let control = match source {
-        Source::Window(h) => {
-            start!(Window::from_raw_hwnd(win::hwnd_from_u64(*h).0))
-        }
-        Source::Monitor(h) => {
-            start!(Monitor::from_raw_hmonitor(*h as *mut std::ffi::c_void))
-        }
-    }
-    .map_err(internal)?;
+    let Session { control, shared } = Session::start(source, crop, opts)?;
 
     let mut settled = false;
     let mut failure = None;
@@ -375,19 +434,17 @@ pub fn grab(source: &Source, crop: CropSpec, opts: &Opts) -> Result<Grab, SightE
     })
 }
 
-/// Screen-capture an arbitrary physical-pixel region (so popups and menus are
-/// included), stitching across monitors. Areas outside every monitor are black.
-/// Monitors are captured concurrently, so they share one `--timeout`.
-pub fn grab_region(
-    region: Rect,
-    opts: &Opts,
-    warnings: &mut Vec<String>,
-) -> Result<(RgbaImage, bool), SightError> {
-    let mut canvas = RgbaImage::from_pixel(
-        region.w as u32,
-        region.h as u32,
-        image::Rgba([0, 0, 0, 255]),
-    );
+/// The slices of a screen region that lie on each monitor.
+pub struct Part {
+    pub hmon: isize,
+    /// In screen coordinates.
+    pub inter: Rect,
+    /// In the monitor's own coordinates (for `CropSpec::Rect`).
+    pub local: Rect,
+}
+
+/// Split `region` per monitor; the second value is the number of covered px.
+pub fn region_parts(region: Rect) -> Result<(Vec<Part>, i64), SightError> {
     let mut parts = Vec::new();
     let mut covered = 0i64;
     for m in &win::monitors() {
@@ -401,7 +458,11 @@ pub fn grab_region(
             w: inter.w,
             h: inter.h,
         };
-        parts.push((m.hmon, inter, local));
+        parts.push(Part {
+            hmon: m.hmon,
+            inter,
+            local,
+        });
     }
     if covered == 0 {
         return Err(SightError::InvalidArgs(format!(
@@ -409,15 +470,32 @@ pub fn grab_region(
             region.x, region.y, region.w, region.h
         )));
     }
+    Ok((parts, covered))
+}
+
+/// Screen-capture an arbitrary physical-pixel region (so popups and menus are
+/// included), stitching across monitors. Areas outside every monitor are black.
+/// Monitors are captured concurrently, so they share one `--timeout`.
+pub fn grab_region(
+    region: Rect,
+    opts: &Opts,
+    warnings: &mut Vec<String>,
+) -> Result<(RgbaImage, bool), SightError> {
+    let mut canvas = RgbaImage::from_pixel(
+        region.w as u32,
+        region.h as u32,
+        image::Rgba([0, 0, 0, 255]),
+    );
+    let (parts, covered) = region_parts(region)?;
     // Each monitor part compares against its own slice of the baseline.
     let part_opts = parts
         .iter()
-        .map(|&(_, inter, _)| {
+        .map(|p| {
             let rel = Rect {
-                x: inter.x - region.x,
-                y: inter.y - region.y,
-                w: inter.w,
-                h: inter.h,
+                x: p.inter.x - region.x,
+                y: p.inter.y - region.y,
+                w: p.inter.w,
+                h: p.inter.h,
             };
             opts.baseline
                 .as_ref()
@@ -430,8 +508,8 @@ pub fn grab_region(
         let handles: Vec<_> = parts
             .iter()
             .zip(&part_opts)
-            .map(|(&(hmon, _, local), o)| {
-                s.spawn(move || grab(&Source::Monitor(hmon), CropSpec::Rect(local), o))
+            .map(|(p, o)| {
+                s.spawn(move || grab(&Source::Monitor(p.hmon), CropSpec::Rect(p.local), o))
             })
             .collect();
         handles
@@ -443,7 +521,8 @@ pub fn grab_region(
             .collect()
     });
     let mut settled = true;
-    for ((_, inter, _), g) in parts.iter().zip(results) {
+    for (p, g) in parts.iter().zip(results) {
+        let inter = p.inter;
         let g = g?;
         settled &= g.settled;
         image::imageops::replace(

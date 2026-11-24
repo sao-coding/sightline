@@ -88,6 +88,43 @@ JPEG 品質為 80。視窗擷取（`--pid` / `--hwnd`）另外會回傳 `popups`
 
 輸出：`changed`、`change_ms`、`settled`、`elapsed_ms`。用 `--crop` 可以只盯視窗裡應該發生變化的那一塊。
 
+### `rec`
+
+把視窗或螢幕區域錄成 GIF 動圖，用於 README 展示和測試證據。與 `shot` 一樣，`--pid`、`--hwnd`、`--region` 必須且只能指定一個。
+
+| 參數 | 預設值 | 意義 |
+|---|---|---|
+| `--duration <ms>` | 必填 | 錄製時間長度，從擷取到第一幀時開始算 |
+| `--fps <N>` | `10` | 取樣幀率，1 到 30 |
+| `--max-edge <N>` | `800` | 縮小到長邊不超過 N 像素（`0` 表示原尺寸） |
+| `--until-settled <ms>` | 關閉 | 影像發生變化後又連續這麼久沒變，就提前結束（不會超過 `--duration`） |
+| `--keyframes <N>` | `0` | 另外儲存 N 張變化最大時刻的 PNG 靜態幀 |
+| `--crop x,y,w,h` | | 與 `shot` 相同的相對於視窗的裁切（僅限 `--pid` / `--hwnd`） |
+| `--out <path>` | 暫存資料夾 | GIF 路徑。預設 `%TEMP%\sightline\rec-<時間戳記>.gif`；靜態幀存為旁邊的 `<name>-key1.png` 等 |
+
+`rec` **會阻塞**到錄製結束，所以代理應當在操作的同時讓它在背景執行（見下）。它使用與 `shot` 相同的 Windows Graphics Capture 工作階段，包括彈出視窗的螢幕擷取後備和跨螢幕區域。
+
+- **幀。** 依 `--fps` 取樣；只有像素變化時才寫入新幀，沒變化的時段只是延長上一幀的延遲。靜止的視窗只錄出一幀，延遲很長。延遲以百分之一秒（GIF 的單位）為單位，取自連續的時間線；機器忙碌時實際幀數可能少於 `--fps`。
+- **計時。** 從擷取到第一幀時開始計時（擷取啟動約需 0.3 秒），所以 `elapsed_ms` 比 `duration_ms` 大約多 0.7 秒。
+- **`--until-settled`** 在第一幀之後的第一次變化時才開始計時。錄製開始時視窗是靜止的，不會導致它結束；如果始終沒有變化，就錄滿 `--duration`。
+- **輸出。** `path`、`frames`、`fps`、`duration_ms`（GIF 本身的長度）、`image`、`size_bytes`、`stopped`（`duration` 或 `settled`）、`elapsed_ms`，以及與 `shot` 相同的 `maps_to`、`scale`、`dpi_scale`、`monitor_dpi_scale`、`formula`，視窗還有 `window`、`formula_window`、`formula_client`、`popups`。它們把 GIF 像素（和靜態幀像素）換算成錄製開始時的座標。指定 `--keyframes N` 時，`keyframes` 列出 `{t_ms, path}`：第一幀、最後一幀，以及中間變化最大的幀（共 N 張，不同的幀不夠時更少），依時間排序；`t_ms` 從 GIF 開頭算起。
+- **警告。** `gif_large`（超過約 10 MB）、`window_resized_during_recording`（之後的幀會依第一幀的大小裁切或補邊），以及 `shot` 的那些警告。
+- **限制。** 彈出視窗只在錄製開始時偵測一次：之後才開啟的選單不會出現在視窗錄影裡（這種情況請錄 `--region`）。公式裡的視窗位置是開始時的位置。
+
+```
+> sight rec --hwnd 11736012 --duration 4000 --keyframes 3 --out demo.gif
+{"v":1,"ok":true,"data":{"path":"C:\\Users\\me\\AppData\\Local\\Temp\\sightline\\rec-20261124-161200-100.gif","frames":22,"fps":10,"duration_ms":4000,"image":{"w":642,"h":452},"size_bytes":597570,"maps_to":{"space":"screen_physical","x":207,"y":150,"w":642,"h":452},"scale":1.0,"dpi_scale":1.0,"monitor_dpi_scale":1.0,"formula":"screen_x = 207 + px / 1.0; screen_y = 150 + py / 1.0","window":{"frame":{"x":207,"y":150,"w":642,"h":452},"client":{"x":208,"y":181,"w":640,"h":420},"client_offset":{"x":1,"y":31}},"formula_window":"win_x = 0 + px / 1.0; win_y = 0 + py / 1.0","formula_client":"client_x = -1 + px / 1.0; client_y = -31 + py / 1.0","stopped":"duration","elapsed_ms":4504,"popups":[],"keyframes":[{"t_ms":1,"path":"...\\rec-20261124-161200-100-key1.png"},{"t_ms":1500,"path":"...\\rec-20261124-161200-100-key2.png"},{"t_ms":2700,"path":"...\\rec-20261124-161200-100-key3.png"}]},"warnings":[]}
+```
+
+在操作的同時放到背景執行（它啟動約需 0.3 秒；第一次操作前先等約 0.5 秒）：
+
+```powershell
+$job = Start-Job { sight rec --hwnd 15603054 --duration 10000 --until-settled 500 --keyframes 3 --out demo.gif }
+Start-Sleep -Milliseconds 500                       # 0.3 s
+# ... act with your own tool ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json
+```
+
 ### `stat`
 
 取樣某個程序（預設連同所有子孫程序）的 CPU 與記憶體。

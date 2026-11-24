@@ -47,6 +47,7 @@ sight stat --pid 19668 --duration 2000    # 用了多少 CPU 和記憶體？
 | `list` | 有哪些視窗？該鎖定哪個 PID / HWND？ | 不必寫死 PID 或標題；提供位置、所在螢幕、DPI、是否最小化 |
 | `shot` | 這個視窗現在長什麼樣子？ | 被遮住也能擷取、帶上彈出選單、等變化再等穩定、相對於視窗的 `--crop`、多種座標公式 |
 | `wait` | 我操作之後，UI 變了並穩定了嗎？ | 與 `shot` 相同的等待邏輯，但不出圖；回傳 `changed`、`change_ms`、`settled` |
+| `rec` | 把發生的事錄成動圖給我看 | 視窗、裁切區或螢幕區域錄成 GIF；合併相同的幀；支援 `--until-settled`、`--keyframes` 靜態幀 |
 | `stat` | 這個程式在一段時間內用了多少 CPU 和記憶體？ | 量整棵程序樹（Electron、瀏覽器、遊戲），avg/p95/max，以私有位元組計算，共用分頁不會重複計入 |
 | `doctor` | 這台電腦有幾個螢幕、各自縮放多少？ | 結果怪怪的時候先跑它 |
 
@@ -139,6 +140,19 @@ sight shot --hwnd 15603054 --settle 300   # 等畫面穩定後擷取
    ```
 
    這是一個 PowerShell 無窮迴圈：吃滿一個核心（`cpu_core_pct` ≈ 100），佔 16 核心的約 6.3%（`cpu_total_pct`）。
+
+### 錄製 GIF
+
+`sight rec` 把視窗或螢幕區域錄下來，用於 README 展示和測試證據。它會一直阻塞到錄完，所以請在你操作的同時讓它在背景執行：
+
+```powershell
+$job = Start-Job { sight rec --hwnd 15603054 --duration 10000 --until-settled 500 --keyframes 3 --out demo.gif }
+Start-Sleep -Milliseconds 500                       # 0.3 s
+# ... act with your own tool ...
+$rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json
+```
+
+回傳結果包含 `frames`、`fps`、`duration_ms`、`size_bytes`，以及與 `shot` 相同的座標公式。相同的幀會被合併（靜止的視窗只有一幀很長的畫面），`--keyframes 3` 還會把變化最大的幾個時刻存成 PNG 靜態幀，代理不用解碼 GIF 就能檢查錄影。預設 `--fps 10`（最大 30）、`--max-edge 800`。
 
 ### 座標：選與你的輸入工具一致的原點
 
