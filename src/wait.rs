@@ -22,12 +22,13 @@ pub fn run(args: &WaitArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
     let start = Instant::now();
     let mut warnings = Vec::new();
     let cap = shot::acquire(&args.cap, args.change, start, &mut warnings)?;
-    let data = json!({
+    let mut data = json!({
         "changed": cap.changed,
         "change_ms": cap.change_ms,
         "settled": cap.settled,
         "elapsed_ms": start.elapsed().as_millis() as u64,
     });
+    shot::add_details(&mut data, cap.size_change, &cap.other_candidates);
     if cap.settled {
         Ok((data, warnings))
     } else {

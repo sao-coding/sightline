@@ -239,17 +239,11 @@ pub fn run(args: &StatArgs) -> Result<(Value, Vec<String>), SightError> {
         lost_cpu = true;
     }
     if lost_cpu {
-        warnings.push(
-            "processes_exited_during_sampling: CPU used by them after their last sample is not counted"
-                .into(),
-        );
+        // Each process in `processes` carries its own `exited` flag.
+        warnings.push("processes_exited_during_sampling".into());
     }
     if !denied.is_empty() {
-        let list: Vec<String> = denied.iter().map(|(p, e)| format!("{e}({p})")).collect();
-        warnings.push(format!(
-            "access_denied_for_some_processes: no CPU/memory data for {}",
-            list.join(", ")
-        ));
+        warnings.push("access_denied_for_some_processes".into());
     }
     let processes: Vec<Tracked> = tracked
         .into_iter()
@@ -271,6 +265,13 @@ pub fn run(args: &StatArgs) -> Result<(Value, Vec<String>), SightError> {
         "mem_measure": MEM_MEASURE,
         "processes": processes,
     });
+    let mut data = data;
+    if !denied.is_empty() {
+        data["access_denied"] = denied
+            .iter()
+            .map(|(p, e)| json!({"pid": p, "exe": e}))
+            .collect();
+    }
     Ok((data, warnings))
 }
 

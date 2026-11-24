@@ -273,7 +273,7 @@ pub fn run(args: &RecArgs) -> Result<(Value, Vec<String>), SightError> {
     } else {
         let hwnd = match (args.hwnd, args.pid) {
             (Some(h), _) => h,
-            (None, Some(pid)) => shot::pick_pid_window(pid, &mut warnings)?,
+            (None, Some(pid)) => shot::pick_pid_window(pid, &mut warnings)?.0,
             (None, None) => unreachable!("validated above"),
         };
         let plan = shot::plan_window(hwnd, args.crop.as_ref().map(|c| c.0), &mut warnings)?;

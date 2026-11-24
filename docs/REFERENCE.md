@@ -22,7 +22,7 @@ desktop, cloaked windows and windows under 10 px are hidden.
 
 Each window has `hwnd`, `pid`, `exe`, `title`, `rect` (physical screen px), `monitor` (1-based),
 `dpi_scale`, `monitor_dpi_scale`, `minimized`. Minimized windows omit `rect` and `monitor`. If
-`--limit` cuts the list, `data` gets `total` and `truncated:true`, plus a `list_truncated`
+`--limit` cuts the list, `data` gets `total`, `limit` and `truncated:true`, plus a `list_truncated`
 warning: narrow with `--exe`, `--title` or `--pid`.
 
 ### `shot`
@@ -31,7 +31,7 @@ Screenshot to a file. Exactly one of `--pid`, `--hwnd`, `--region` is required.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--pid <PID>` | | Largest visible window of this process (others appear as `other_candidate_window` warnings) |
+| `--pid <PID>` | | Largest visible window of this process (the others are listed in `data.other_candidates`, with one `other_candidate_window` warning) |
 | `--hwnd <HWND>` | | This window (decimal, as printed by `list`) |
 | `--region x,y,w,h` | | Screen region in physical px; a real screen capture, so anything on top is included |
 | `--crop x,y,w,h` | | Keep only this rect, relative to the window's DWM frame top-left, in physical px. `--pid` / `--hwnd` only (`INVALID_ARGS` with `--region`, or when it falls outside the window; the hint gives the window size). Applied before `--scale` and `--max-edge` |
@@ -44,7 +44,8 @@ Screenshot to a file. Exactly one of `--pid`, `--hwnd`, `--region` is required.
 | `--timeout <ms>` | `5000` | Overall timeout, shared by the change and settle phases |
 | `--out <path>` | temp dir | `.png` / `.jpg` / `.jpeg` picks the format. Default `%TEMP%\sightline\shot-<timestamp>.jpg` |
 
-JPEG quality is 80. Window captures also return `popups` (possibly empty). Warnings:
+JPEG quality is 80. Window captures also return `popups` (possibly empty). Warnings are plain codes;
+details live in `data` fields (`other_candidates`, `baseline_size` and `size`). Codes:
 `other_candidate_window`, `popups_included_via_screen_capture`, `region_partially_offscreen`,
 `region_spans_mixed_dpi`, `window_dpi_unaware_or_virtualized`, `client_rect_unavailable`.
 
@@ -101,8 +102,8 @@ applies as usual. If it matches, waiting continues for a later change as with `-
 - **Resized windows count as a change.** If the window, or the `--crop` result, has a different pixel
   size (after cropping, before scaling) than the baseline, the capture is reported as changed
   (`changed:true`, `change_ms` about the first frame time) with the warning
-  `baseline_size_changed: {"baseline":{"w":642,"h":452},"now":{"w":742,"h":512}}`, and
-  `--settle` then applies as usual. A click often resizes or expands a window, and the agent needs
+  `baseline_size_changed` (the sizes are in `data.baseline_size` and `data.size`, each `{w,h}`, e.g.
+  `{"w":642,"h":452}` and `{"w":742,"h":512}`), and `--settle` then applies as usual. A click often resizes or expands a window, and the agent needs
   that as a result, not an error. If the new size puts the `--crop` outside the window it is
   `INVALID_ARGS` as usual, and the hint gives the window size.
 - **JPEG and scaled baselines need no tolerance.** The default `shot` format is JPEG (quality 80) and
@@ -201,7 +202,9 @@ Sample CPU and memory of a process and, by default, all its descendants.
 - `mem_mb`: private bytes in MiB, summed over the tree. `processes` lists every process sampled.
 - Why the tree matters: on one machine, an Edge PID reported 46 processes and 6293 MiB; with
   `--no-tree` the same PID showed 561 MiB.
-- Warnings: `target_exited`, `processes_exited_during_sampling`, `access_denied_for_some_processes`.
+- Warnings (plain codes): `target_exited`; `processes_exited_during_sampling` (CPU they used after their last
+  sample is not counted; each entry of `processes` has its own `exited` flag);
+  `access_denied_for_some_processes` (no CPU or memory data for them; `data.access_denied` lists `{pid, exe}`).
 
 ### `doctor`
 

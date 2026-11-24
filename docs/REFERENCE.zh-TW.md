@@ -19,7 +19,7 @@
 | `--full-title` | 不截斷標題（預設前 40 個字元 + `…`） |
 | `--limit <N>` | 最多回傳的視窗數（預設 50，`--all` 也適用） |
 
-每個視窗包含：`hwnd`、`pid`、`exe`、`title`、`rect`（螢幕實體像素）、`monitor`（從 1 起算）、`dpi_scale`、`monitor_dpi_scale`、`minimized`。依 Z 順序排列，最上層在前。最小化的視窗不含 `rect` 與 `monitor`。標題被截斷時多一個 `title_truncated:true`，`--title` 仍以完整標題比對。超過 `--limit` 時，`data` 多出 `total` 與 `truncated:true`，並給出 `list_truncated` 警告，提示用 `--exe`、`--title` 或 `--pid` 縮小範圍。
+每個視窗包含：`hwnd`、`pid`、`exe`、`title`、`rect`（螢幕實體像素）、`monitor`（從 1 起算）、`dpi_scale`、`monitor_dpi_scale`、`minimized`。依 Z 順序排列，最上層在前。最小化的視窗不含 `rect` 與 `monitor`。標題被截斷時多一個 `title_truncated:true`，`--title` 仍以完整標題比對。超過 `--limit` 時，`data` 多出 `total`、`limit` 與 `truncated:true`，並給出 `list_truncated` 警告，提示用 `--exe`、`--title` 或 `--pid` 縮小範圍。
 
 ### `shot`
 
@@ -27,7 +27,7 @@
 
 | 參數 | 預設值 | 意義 |
 |---|---|---|
-| `--pid <PID>` | | 擷取該程序最大的可見視窗（其他視窗以 `other_candidate_window` 警告列出） |
+| `--pid <PID>` | | 擷取該程序最大的可見視窗（其他視窗列在 `data.other_candidates` 中，並給出一條 `other_candidate_window` 警告） |
 | `--hwnd <HWND>` | | 擷取這個視窗（十進位，與 `list` 輸出相同） |
 | `--region x,y,w,h` | | 螢幕區域，實體像素；真正的螢幕擷取，蓋在上面的東西都會被截進去 |
 | `--crop x,y,w,h` | | 只保留這個矩形，座標相對於視窗 DWM 邊框的左上角，實體像素。僅限 `--pid` / `--hwnd`（與 `--region` 併用，或超出視窗，都會回傳 `INVALID_ARGS`，`hint` 會給出視窗大小）。先於 `--scale` 與 `--max-edge` 套用 |
@@ -42,7 +42,7 @@
 
 JPEG 品質為 80。視窗擷取（`--pid` / `--hwnd`）另外會回傳 `popups`（可能為空）。
 
-警告：`other_candidate_window: ...`、`popups_included_via_screen_capture`、`region_partially_offscreen`、`region_spans_mixed_dpi`、`window_dpi_unaware_or_virtualized`、`client_rect_unavailable`。
+警告都是純代碼，細節放在 `data` 欄位裡（`other_candidates`、`baseline_size`、`size`）。代碼：`other_candidate_window`、`popups_included_via_screen_capture`、`region_partially_offscreen`、`region_spans_mixed_dpi`、`window_dpi_unaware_or_virtualized`、`client_rect_unavailable`。
 
 輸出欄位：`path`、`image`、`maps_to`、`scale`、`dpi_scale`、`monitor_dpi_scale`、`formula`；視窗目標另有 `window`、`formula_window`、`formula_client`（見[座標與 DPI](#座標與-dpi)）；以及一律存在的 `settled`、`changed`、`change_ms`、`elapsed_ms`。
 
@@ -72,7 +72,7 @@ JPEG 品質為 80。視窗擷取（`--pid` / `--hwnd`）另外會回傳 `popups`
 擷取到的第一幀會與這張圖比較；若至少有 `--min-change-px` 個像素不同，就立刻算作變化（此時 `change_ms` 約等於第一幀抵達的時間），然後照常套用 `--settle`。若一致，則像 `--expect-change` 那樣繼續等待之後的變化。
 
 - **必須可比較。** 每次 `shot` 都會在圖片旁寫一個旁置檔 `<name>.sight.json`（取代副檔名），記錄目標（`window` + `hwnd`，或 `region` + 矩形）、相對於視窗的 `crop`、裁切後縮放前的像素大小（`source`）、儲存大小（`image`）與 `format`。`--baseline` 會拿它與新的擷取核對：目標類型或 `--crop` 不同、圖片與旁置檔不再一致、或檔案不存在時，回傳帶 `hint` 的 `INVALID_ARGS`。移動視窗沒問題，因為裁切和比較都是相對於視窗的。不是 sight 截的圖（沒有旁置檔）會被當作未縮放的 1:1 影像，並給出警告 `baseline_without_metadata`；它的大小與本次擷取不同時是 `INVALID_ARGS`。
-- **視窗大小變了算作變化。** 視窗（或 `--crop` 的結果）的像素大小（裁切後、縮放前）與基準圖不同時，會回報為已變化（`changed:true`，`change_ms` 約等於第一幀抵達的時間），並帶警告 `baseline_size_changed: {"baseline":{"w":642,"h":452},"now":{"w":742,"h":512}}`，之後照常套用 `--settle`。點擊經常會讓視窗變大或展開，代理需要的是這個結果，而不是一個錯誤。若新的大小使 `--crop` 超出視窗，仍照常回傳 `INVALID_ARGS`，`hint` 給出視窗大小。
+- **視窗大小變了算作變化。** 視窗（或 `--crop` 的結果）的像素大小（裁切後、縮放前）與基準圖不同時，會回報為已變化（`changed:true`，`change_ms` 約等於第一幀抵達的時間），並帶警告 `baseline_size_changed`（大小在 `data.baseline_size` 和 `data.size` 裡，各為 `{w,h}`，例如 `{"w":642,"h":452}` 與 `{"w":742,"h":512}`），之後照常套用 `--settle`。點擊經常會讓視窗變大或展開，代理需要的是這個結果，而不是一個錯誤。若新的大小使 `--crop` 超出視窗，仍照常回傳 `INVALID_ARGS`，`hint` 給出視窗大小。
 - **JPEG 與縮放過的基準圖不需要容差。** `shot` 預設存 JPEG（品質 80），預設的 `--max-edge` 也會縮小大視窗。這裡不做模糊比對，而是把即時幀先經過與 `shot` 相同的縮放、相同的 JPEG 編碼/解碼再比較，所以相同的像素必然完全相等。`--max-edge 0` 的 `.png` 仍然最省（不用逐幀轉換）。唯一的例外：縮放過或 JPEG 的基準圖不能用於跨多個螢幕或超出螢幕邊緣的 `--region`（或彈出視窗的螢幕擷取後備），那會回傳 `INVALID_ARGS`，請改用 `--max-edge 0` 的 `.png`。
 - 其他警告：`baseline_size_changed`、`baseline_metadata_unreadable`、`baseline_metadata_not_written`（旁置檔寫不出來）。
 
@@ -140,7 +140,7 @@ $rec = Receive-Job $job -Wait -AutoRemoveJob | ConvertFrom-Json
 - `cpu_core_pct`：100 代表吃滿一個邏輯核心。`cpu_total_pct` = `cpu_core_pct` / `logical_cores`。
 - `mem_mb`：私有位元組，單位 MiB，整棵樹加總。`processes` 列出所有被取樣的程序。
 - 為什麼要看整棵樹：在一台電腦上對 Edge 瀏覽器的 PID 跑 `stat`，得到 46 個程序、`mem_mb` 6293 MiB；加上 `--no-tree` 只剩 561 MiB。
-- 警告：`target_exited`、`processes_exited_during_sampling: ...`、`access_denied_for_some_processes: ...`。
+- 警告（純代碼）：`target_exited`；`processes_exited_during_sampling`（它們在最後一次取樣之後用掉的 CPU 不計入；`processes` 裡每一項都有自己的 `exited` 旗標）；`access_denied_for_some_processes`（拿不到它們的 CPU 與記憶體資料；`data.access_denied` 列出 `{pid, exe}`）。
 
 ### `doctor`
 

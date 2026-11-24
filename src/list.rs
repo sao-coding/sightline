@@ -83,10 +83,8 @@ pub fn run(args: &ListArgs) -> Result<(Value, Vec<String>), SightError> {
     if total > args.limit {
         data["total"] = json!(total);
         data["truncated"] = json!(true);
-        warnings.push(format!(
-            "list_truncated: showing {} of {total}; narrow with --exe, --title or --pid (or raise --limit)",
-            args.limit
-        ));
+        data["limit"] = json!(args.limit);
+        warnings.push("list_truncated".into());
     }
     Ok((data, warnings))
 }

@@ -130,6 +130,10 @@ pub struct Captured {
     window: Option<WindowGeo>,
     target: TargetId,
     crop: Option<Rect>,
+    /// Set when a `--baseline` had another size than this capture.
+    pub size_change: Option<SizeChange>,
+    /// Other windows of the `--pid` process that were not picked.
+    pub other_candidates: Vec<Value>,
 }
 
 /// Window classes that are popups by nature (menus, tooltips, dropdown lists,
@@ -180,6 +184,13 @@ fn crop_to_screen(crop: Rect, frame: Rect) -> Result<Rect, SightError> {
     })
 }
 
+/// The capture has another pixel size than its `--baseline` image.
+#[derive(Clone, Copy)]
+pub struct SizeChange {
+    pub baseline: Size,
+    pub now: Size,
+}
+
 /// `opts` with `--baseline` matched to a capture of `source` px (after crop, before scaling).
 fn with_baseline(
     opts: &Opts,
@@ -188,19 +199,20 @@ fn with_baseline(
     crop: Option<Rect>,
     source: (i32, i32),
     warnings: &mut Vec<String>,
-) -> Result<Opts, SightError> {
+) -> Result<(Opts, Option<SizeChange>), SightError> {
     let Some(b) = baseline else {
-        return Ok(opts.clone());
+        return Ok((opts.clone(), None));
     };
     let (b, resized) = b.prepare(target, crop, (source.0 as u32, source.1 as u32))?;
     if let Some((was, now)) = resized {
         // Resizing or expanding is what a click often does: report it as a change.
-        warnings.push(format!(
-            "baseline_size_changed: {}",
-            json!({"baseline": {"w": was.w, "h": was.h}, "now": {"w": now.w, "h": now.h}})
+        warnings.push("baseline_size_changed".into());
+        return Ok((
+            opts.with_baseline(Some(b)),
+            Some(SizeChange { baseline: was, now }),
         ));
     }
-    Ok(opts.with_baseline(Some(b)))
+    Ok((opts.with_baseline(Some(b)), None))
 }
 
 /// How a window target is captured.
@@ -317,7 +329,8 @@ fn capture_window(
 ) -> Result<Captured, SightError> {
     let plan = plan_window(hwnd, crop, warnings)?;
     let target = TargetId::Window { hwnd };
-    let opts = &with_baseline(opts, baseline, target, crop, plan.source, warnings)?;
+    let (opts, size_change) = with_baseline(opts, baseline, target, crop, plan.source, warnings)?;
+    let opts = &opts;
     let (img, maps_to, settled) = match plan.how {
         How::Region(region) => {
             let (img, settled) = capture::grab_region(region, opts, warnings)?;
@@ -346,11 +359,17 @@ fn capture_window(
         window: Some(plan.geo),
         target,
         crop,
+        size_change,
+        other_candidates: Vec::new(),
     })
 }
 
-/// Pick the largest visible window of a pid; the rest become warnings.
-pub fn pick_pid_window(pid: u32, warnings: &mut Vec<String>) -> Result<u64, SightError> {
+/// Pick the largest visible window of a pid. Returns its hwnd and a description
+/// of the other candidates (also flagged by one `other_candidate_window` warning).
+pub fn pick_pid_window(
+    pid: u32,
+    warnings: &mut Vec<String>,
+) -> Result<(u64, Vec<Value>), SightError> {
     let all: Vec<WinInfo> = win::enum_windows()
         .into_iter()
         .filter(|w| w.pid == pid && w.visible && !w.cloaked && !(w.rect.is_empty() && !w.minimized))
@@ -379,13 +398,14 @@ pub fn pick_pid_window(pid: u32, warnings: &mut Vec<String>) -> Result<u64, Sigh
             "no visible window found for pid {pid}"
         )));
     };
-    for o in &cands[1..] {
-        warnings.push(format!(
-            "other_candidate_window: hwnd={} title={:?} rect={},{},{}x{}",
-            o.hwnd, o.title, o.rect.x, o.rect.y, o.rect.w, o.rect.h
-        ));
+    let others: Vec<Value> = cands[1..]
+        .iter()
+        .map(|o| json!({"hwnd": o.hwnd, "title": o.title, "rect": o.rect}))
+        .collect();
+    if !others.is_empty() {
+        warnings.push("other_candidate_window".into());
     }
-    Ok(best.hwnd)
+    Ok((best.hwnd, others))
 }
 
 pub fn fmt_num(v: f64) -> String {
@@ -504,7 +524,8 @@ pub fn acquire(
 
     let mut cap = if let Some(Region(r)) = &args.region {
         let target = TargetId::Region { rect: *r };
-        let opts = with_baseline(&opts, loaded.as_ref(), target, None, (r.w, r.h), warnings)?;
+        let (opts, size_change) =
+            with_baseline(&opts, loaded.as_ref(), target, None, (r.w, r.h), warnings)?;
         let (img, settled) = capture::grab_region(*r, &opts, warnings)?;
         if win::spans_mixed_dpi(r) {
             warnings.push("region_spans_mixed_dpi".into());
@@ -523,20 +544,24 @@ pub fn acquire(
             window: None,
             target,
             crop: None,
+            size_change,
+            other_candidates: Vec::new(),
         }
     } else {
-        let hwnd = match (args.hwnd, args.pid) {
-            (Some(h), _) => h,
+        let (hwnd, others) = match (args.hwnd, args.pid) {
+            (Some(h), _) => (h, Vec::new()),
             (None, Some(pid)) => pick_pid_window(pid, warnings)?,
             (None, None) => unreachable!("validated above"),
         };
-        capture_window(
+        let mut cap = capture_window(
             hwnd,
             args.crop.as_ref().map(|c| c.0),
             loaded.as_ref(),
             &opts,
             warnings,
-        )?
+        )?;
+        cap.other_candidates = others;
+        cap
     };
     cap.change_ms = opts.change_ms();
     cap.changed = cap.change_ms.is_some();
@@ -605,6 +630,7 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
     });
     add_formulas(&mut data, m, &sc, cap.window.as_ref());
     data["settled"] = json!(cap.settled);
+    add_details(&mut data, cap.size_change, &cap.other_candidates);
     data["changed"] = json!(cap.changed);
     data["change_ms"] = json!(cap.change_ms);
     data["elapsed_ms"] = json!(start.elapsed().as_millis() as u64);
@@ -628,6 +654,18 @@ pub fn run(args: &ShotArgs) -> Result<(Value, Vec<String>), Box<ShotFail>> {
 }
 
 /// `{prefix}_x = {ox} + px / {sc}; {prefix}_y = {oy} + py / {sc}`
+/// Details behind warnings, as data fields: `baseline_size` and `size` for
+/// `baseline_size_changed`, `other_candidates` for `other_candidate_window`.
+pub fn add_details(data: &mut Value, size_change: Option<SizeChange>, others: &[Value]) {
+    if let Some(c) = size_change {
+        data["baseline_size"] = json!({"w": c.baseline.w, "h": c.baseline.h});
+        data["size"] = json!({"w": c.now.w, "h": c.now.h});
+    }
+    if !others.is_empty() {
+        data["other_candidates"] = Value::Array(others.to_vec());
+    }
+}
+
 /// Add `formula` (screen) and, for window targets, `window`, `formula_window`
 /// and `formula_client`: how image px map to each origin. `m` is what the image
 /// covers on screen, `sc` the formatted px-per-screen-px scale.
