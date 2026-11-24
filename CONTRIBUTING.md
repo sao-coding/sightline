@@ -33,17 +33,36 @@ CI runs the same four commands on Windows. Please run them before you push.
 
 ## Changelog and releases
 
-User-facing changes need a changeset. Run `knope document-change` and describe the change in one
-or two lines; pick `patch` for a fix, `minor` for a feature. Do not edit `CHANGELOG.md` or the
-version in `Cargo.toml` by hand.
+The version and `CHANGELOG.md` come from **changesets only**. Commit messages are never read for
+them (`knope.toml` sets `ignore_conventional_commits`), so keep writing them in Conventional
+Commits style for readability, but they do not change the version or the changelog.
+
+- Every user-visible change needs a changeset: a Markdown file in `.changeset/`. Run
+  `knope document-change`, or write it by hand (`.changeset/short_name.md`):
+
+  ```markdown
+  ---
+  default: minor
+  ---
+
+  #### Short title of the change
+
+  - What changed, in one or two lines a user can act on.
+  ```
+
+  Use `patch` for a fix, `minor` for a feature, `major` for a breaking change.
+- CI-only, docs-only and other changes users never see need no changeset.
+- Do not edit `CHANGELOG.md` or the version in `Cargo.toml` by hand.
 
 Releases go through a pull request, because `main` does not accept direct pushes:
 
 1. Merge your change with its changeset into `main`.
-2. The `Prepare release` workflow runs automatically when `.changeset/` changes on `main` (or run
-   it by hand from the Actions tab). It bumps the version and `CHANGELOG.md` on the `release`
-   branch and opens or updates the PR `chore: release vX.Y.Z`.
-3. Review the release PR and merge it (squash).
+2. The `Prepare release` workflow runs on every push to `main` (or run it by hand from the
+   Actions tab). If changesets are pending, it bumps the version and `CHANGELOG.md` on the
+   `release` branch and opens or updates the PR `chore: release vX.Y.Z`. With none pending it does
+   nothing.
+3. Review the release PR and merge it (squash). It deletes the changesets, so the push that merges
+   it finds nothing pending and opens no new PR.
 4. The `Release` workflow runs on that merge: it builds `sight.exe`, tags `vX.Y.Z` and publishes
    the GitHub release with the assets.
 
