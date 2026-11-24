@@ -146,7 +146,9 @@ One turn of the agent loop:
 
    The same order with `wait --change` and no `--baseline` fails with a false `TIMEOUT`. Each shot
    writes a sidecar `before.sight.json`; a baseline from another window, with another `--crop`, or
-   from a resized window is `INVALID_ARGS`, never a silent wrong comparison.
+   of another kind (window vs region) is `INVALID_ARGS`, never a silent wrong comparison. A window that
+   was resized or expanded since the baseline counts as a change (`changed:true`, warning
+   `baseline_size_changed`).
 
 5. **Re-check** with the same `shot` and compare. For performance, run `stat` while the app works:
 

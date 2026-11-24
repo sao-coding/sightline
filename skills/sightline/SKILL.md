@@ -100,9 +100,9 @@ sight wait --hwnd H --baseline before.png --settle 300
 
 The first frame is compared with the image, so an instant UI reaction still gives `changed:true` (`change_ms` is then about the first frame time, 300 ms or so). Without `--baseline` the same order gives a false `TIMEOUT` with `changed:false`.
 
-- Must be the same target (the same window, or the same `--region`) and the same `--crop`. The window may have moved but must not have been resized. Every shot writes a sidecar `<name>.sight.json` (target, crop, pixel size before scaling, saved size, format) that is checked; a mismatch is `INVALID_ARGS` with a hint, never a silent wrong comparison. A foreign image without a sidecar is assumed to be unscaled.
+- Must be the same target (the same window, or the same `--region`) and the same `--crop`. The window may have moved. If the window (or the `--crop` result) now has a different pixel size, that counts as a change: `changed:true` and warning `baseline_size_changed: {"baseline":{"w":..,"h":..},"now":{"w":..,"h":..}}`, then `--settle` applies as usual, because a click often resizes or expands the window. If the new size puts the `--crop` outside the window, you get `INVALID_ARGS` (the hint gives the window size). Every shot writes a sidecar `<name>.sight.json` (target, crop, pixel size before scaling, saved size, format) that is checked; a different target kind (window vs region), a different `--crop`, a missing file or a foreign image without a sidecar is `INVALID_ARGS` with a hint, never a silent wrong comparison. A foreign image without a sidecar is assumed to be unscaled.
 - Default JPEG shots and downscaled shots work: the live frame goes through the same resize and JPEG encode as `shot`, so equal pixels compare equal and no tolerance is needed. Exception: a scaled or JPEG baseline cannot be used for a `--region` (or popup screen capture) that spans several monitors; take that baseline as `.png` with `--max-edge 0`.
-- Warnings: `baseline_without_metadata`, `baseline_metadata_unreadable`, `baseline_metadata_not_written` (the shot could not write its sidecar).
+- Warnings: `baseline_size_changed`, `baseline_without_metadata`, `baseline_metadata_unreadable`, `baseline_metadata_not_written` (the shot could not write its sidecar).
 
 ### `rec`: record a GIF
 
@@ -186,7 +186,7 @@ Exit codes: 0 ok, 1 INVALID_ARGS, 2 TARGET_NOT_FOUND, 3 WINDOW_MINIMIZED / WINDO
 
 | Code | Exit | Do |
 |---|---|---|
-| `INVALID_ARGS` | 1 | Fix flags (`--baseline` must match the target, `--crop` and window size of this capture; the hint says how to retake it): exactly one of `--pid`/`--hwnd`/`--region`; scale in (0,16]; duration/interval > 0; `--crop` only with `--pid`/`--hwnd` and inside the window (the hint gives the window size). Also returned for bad CLI syntax. |
+| `INVALID_ARGS` | 1 | Fix flags (`--baseline` must be readable, from the same target kind and `--crop`; the hint says how to retake it): exactly one of `--pid`/`--hwnd`/`--region`; scale in (0,16]; duration/interval > 0; `--crop` only with `--pid`/`--hwnd` and inside the window (the hint gives the window size). Also returned for bad CLI syntax. |
 | `TARGET_NOT_FOUND` | 2 | The pid/hwnd is gone or has no visible window. Run `list` again. |
 | `WINDOW_MINIMIZED` | 3 | Restore the window with your own tool, then retry. |
 | `WINDOW_PROTECTED` | 3 | The window opted out of capture. Do not retry; tell the user. |

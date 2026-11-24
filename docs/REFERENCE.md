@@ -94,11 +94,17 @@ applies as usual. If it matches, waiting continues for a later change as with `-
   its extension): the target (`window` + `hwnd`, or `region` + rect), the window-relative `crop`, the
   pixel size after cropping and before scaling (`source`), the saved size (`image`) and the `format`.
   `--baseline` checks it against the new capture and returns `INVALID_ARGS` with a hint when the
-  target or `--crop` differs, when the pixel size after `--crop` and before scaling differs (including a
-  window that was resized: take the baseline again), or when the image no longer matches its sidecar.
-  Moving a window without resizing it is fine, because crops and comparisons are window-relative.
+  target kind or `--crop` differs, when the image no longer matches its sidecar, or when the file is
+  missing. Moving a window is fine, because crops and comparisons are window-relative.
   A baseline that is not a sight shot (no sidecar) is assumed to be an unscaled 1:1 image, with the
-  warning `baseline_without_metadata`.
+  warning `baseline_without_metadata`; if its size differs from the capture that is `INVALID_ARGS`.
+- **Resized windows count as a change.** If the window, or the `--crop` result, has a different pixel
+  size (after cropping, before scaling) than the baseline, the capture is reported as changed
+  (`changed:true`, `change_ms` about the first frame time) with the warning
+  `baseline_size_changed: {"baseline":{"w":642,"h":452},"now":{"w":742,"h":512}}`, and
+  `--settle` then applies as usual. A click often resizes or expands a window, and the agent needs
+  that as a result, not an error. If the new size puts the `--crop` outside the window it is
+  `INVALID_ARGS` as usual, and the hint gives the window size.
 - **JPEG and scaled baselines need no tolerance.** The default `shot` format is JPEG (quality 80) and
   the default `--max-edge` downscales big windows. Instead of fuzzy matching, the live frame is run
   through the same resize and the same JPEG encode/decode as `shot` before it is compared, so
@@ -106,7 +112,7 @@ applies as usual. If it matches, waiting continues for a later change as with `-
   per-frame conversion). The one exception: a scaled or JPEG baseline cannot be cut up for a `--region`
   (or popup screen capture) that spans several monitors or the screen edge; that is `INVALID_ARGS`, so
   take that baseline as `.png` with `--max-edge 0`.
-- Other warnings: `baseline_metadata_unreadable`, `baseline_metadata_not_written` (the sidecar could not
+- Other warnings: `baseline_size_changed`, `baseline_metadata_unreadable`, `baseline_metadata_not_written` (the sidecar could not
   be written).
 
 ### `wait`
@@ -293,7 +299,7 @@ on a `--settle` or `--expect-change` `TIMEOUT` the latest frame was saved anyway
 | Code | Exit | Meaning | `hint` |
 |---|---|---|---|
 | (success) | 0 | | |
-| `INVALID_ARGS` | 1 | Bad or conflicting flags, `--crop` with `--region`, a `--crop` outside the window, or a `--baseline` that is unreadable or not comparable | run `sight --help` for usage (for a bad `--crop`, the hint gives the window size) |
+| `INVALID_ARGS` | 1 | Bad or conflicting flags, `--crop` with `--region`, a `--crop` outside the window, or a `--baseline` that is unreadable, from another target or `--crop`, or a foreign image of another size | run `sight --help` for usage (for a bad `--crop`, the hint gives the window size) |
 | `TARGET_NOT_FOUND` | 2 | No such pid / hwnd / visible window | run `sight list` to see available targets |
 | `WINDOW_MINIMIZED` | 3 | Target is minimized | restore the window and retry |
 | `WINDOW_PROTECTED` | 3 | Window opted out of capture; do not retry | the window opted out of capture (display affinity) |

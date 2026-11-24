@@ -71,9 +71,10 @@ JPEG 质量为 80。窗口截图（`--pid` / `--hwnd`）还会返回 `popups`（
 
 捕获到的第一帧会与这张图比较；若至少有 `--min-change-px` 个像素不同，就立刻算作变化（此时 `change_ms` 约等于第一帧到达的时间），然后照常套用 `--settle`。若一致，则像 `--expect-change` 那样继续等待之后的变化。
 
-- **必须可比较。** 每次 `shot` 都会在图片旁写一个旁置文件 `<name>.sight.json`（替换扩展名），记录目标（`window` + `hwnd`，或 `region` + 矩形）、相对窗口的 `crop`、裁剪后缩放前的像素大小（`source`）、保存大小（`image`）与 `format`。`--baseline` 会拿它与新的捕获核对：目标或 `--crop` 不同、裁剪后缩放前的像素大小不同（包括窗口被调整过大小：请重新截基准图），或图片与旁置文件不再一致时，返回带 `hint` 的 `INVALID_ARGS`。只移动窗口、不改大小是没问题的，因为裁剪和比较都是相对窗口的。不是 sight 截的图（没有旁置文件）会被当作未缩放的 1:1 图片，并给出警告 `baseline_without_metadata`。
+- **必须可比较。** 每次 `shot` 都会在图片旁写一个旁置文件 `<name>.sight.json`（替换扩展名），记录目标（`window` + `hwnd`，或 `region` + 矩形）、相对窗口的 `crop`、裁剪后缩放前的像素大小（`source`）、保存大小（`image`）与 `format`。`--baseline` 会拿它与新的捕获核对：目标类型或 `--crop` 不同、图片与旁置文件不再一致、或文件不存在时，返回带 `hint` 的 `INVALID_ARGS`。移动窗口没问题，因为裁剪和比较都是相对窗口的。不是 sight 截的图（没有旁置文件）会被当作未缩放的 1:1 图片，并给出警告 `baseline_without_metadata`；它的大小与本次捕获不同时是 `INVALID_ARGS`。
+- **窗口大小变了算作变化。** 窗口（或 `--crop` 的结果）的像素大小（裁剪后、缩放前）与基准图不同时，会报告为已变化（`changed:true`，`change_ms` 约等于第一帧到达的时间），并带警告 `baseline_size_changed: {"baseline":{"w":642,"h":452},"now":{"w":742,"h":512}}`，之后照常套用 `--settle`。点击经常会让窗口变大或展开，智能体需要的是这个结果，而不是一个错误。若新的大小使 `--crop` 超出窗口，仍照常返回 `INVALID_ARGS`，`hint` 给出窗口大小。
 - **JPEG 和缩放过的基准图不需要容差。** `shot` 默认存 JPEG（质量 80），默认的 `--max-edge` 也会缩小大窗口。这里不做模糊匹配，而是把实时帧先经过与 `shot` 相同的缩放、相同的 JPEG 编码/解码再比较，所以相同的像素必然完全相等。`--max-edge 0` 的 `.png` 仍然最省（不用逐帧转换）。唯一的例外：缩放过或 JPEG 的基准图不能用于跨多台显示器或超出屏幕边缘的 `--region`（或弹出窗口的屏幕截图回退），那会返回 `INVALID_ARGS`，请改用 `--max-edge 0` 的 `.png`。
-- 其他警告：`baseline_metadata_unreadable`、`baseline_metadata_not_written`（旁置文件写不出来）。
+- 其他警告：`baseline_size_changed`、`baseline_metadata_unreadable`、`baseline_metadata_not_written`（旁置文件写不出来）。
 
 ### `wait`
 
@@ -217,7 +218,7 @@ screen_y = 278 + 200 / 0.9273 ≈ 278 + 215.7 = 494
 | 错误码 | 退出码 | 含义 | `hint` |
 |---|---|---|---|
 | （成功） | 0 | | |
-| `INVALID_ARGS` | 1 | 参数错误或互相冲突（含解析错误）、`--crop` 与 `--region` 同用、`--crop` 超出窗口、`--baseline` 读不出或不可比较 | run `sight --help` for usage（`--crop` 出错时 `hint` 给出窗口大小） |
+| `INVALID_ARGS` | 1 | 参数错误或互相冲突（含解析错误）、`--crop` 与 `--region` 同用、`--crop` 超出窗口、`--baseline` 读不出、目标或 `--crop` 不同，或是大小不同的外来图片 | run `sight --help` for usage（`--crop` 出错时 `hint` 给出窗口大小） |
 | `TARGET_NOT_FOUND` | 2 | 找不到该 pid / hwnd / 可见窗口 | run `sight list` to see available targets |
 | `WINDOW_MINIMIZED` | 3 | 目标窗口已最小化 | restore the window and retry |
 | `WINDOW_PROTECTED` | 3 | 窗口禁止被截图，不要重试 | the window opted out of capture (display affinity) |

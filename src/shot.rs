@@ -187,11 +187,19 @@ fn with_baseline(
     target: TargetId,
     crop: Option<Rect>,
     source: (i32, i32),
+    warnings: &mut Vec<String>,
 ) -> Result<Opts, SightError> {
     let Some(b) = baseline else {
         return Ok(opts.clone());
     };
-    let b = b.prepare(target, crop, (source.0 as u32, source.1 as u32))?;
+    let (b, resized) = b.prepare(target, crop, (source.0 as u32, source.1 as u32))?;
+    if let Some((was, now)) = resized {
+        // Resizing or expanding is what a click often does: report it as a change.
+        warnings.push(format!(
+            "baseline_size_changed: {}",
+            json!({"baseline": {"w": was.w, "h": was.h}, "now": {"w": now.w, "h": now.h}})
+        ));
+    }
     Ok(opts.with_baseline(Some(b)))
 }
 
@@ -309,7 +317,7 @@ fn capture_window(
 ) -> Result<Captured, SightError> {
     let plan = plan_window(hwnd, crop, warnings)?;
     let target = TargetId::Window { hwnd };
-    let opts = &with_baseline(opts, baseline, target, crop, plan.source)?;
+    let opts = &with_baseline(opts, baseline, target, crop, plan.source, warnings)?;
     let (img, maps_to, settled) = match plan.how {
         How::Region(region) => {
             let (img, settled) = capture::grab_region(region, opts, warnings)?;
@@ -496,7 +504,7 @@ pub fn acquire(
 
     let mut cap = if let Some(Region(r)) = &args.region {
         let target = TargetId::Region { rect: *r };
-        let opts = with_baseline(&opts, loaded.as_ref(), target, None, (r.w, r.h))?;
+        let opts = with_baseline(&opts, loaded.as_ref(), target, None, (r.w, r.h), warnings)?;
         let (img, settled) = capture::grab_region(*r, &opts, warnings)?;
         if win::spans_mixed_dpi(r) {
             warnings.push("region_spans_mixed_dpi".into());

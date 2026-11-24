@@ -71,9 +71,10 @@ JPEG 品質為 80。視窗擷取（`--pid` / `--hwnd`）另外會回傳 `popups`
 
 擷取到的第一幀會與這張圖比較；若至少有 `--min-change-px` 個像素不同，就立刻算作變化（此時 `change_ms` 約等於第一幀抵達的時間），然後照常套用 `--settle`。若一致，則像 `--expect-change` 那樣繼續等待之後的變化。
 
-- **必須可比較。** 每次 `shot` 都會在圖片旁寫一個旁置檔 `<name>.sight.json`（取代副檔名），記錄目標（`window` + `hwnd`，或 `region` + 矩形）、相對於視窗的 `crop`、裁切後縮放前的像素大小（`source`）、儲存大小（`image`）與 `format`。`--baseline` 會拿它與新的擷取核對：目標或 `--crop` 不同、裁切後縮放前的像素大小不同（包括視窗被調整過大小：請重新截基準圖），或圖片與旁置檔不再一致時，回傳帶 `hint` 的 `INVALID_ARGS`。只移動視窗、不改大小是沒問題的，因為裁切和比較都是相對於視窗的。不是 sight 截的圖（沒有旁置檔）會被當作未縮放的 1:1 影像，並給出警告 `baseline_without_metadata`。
+- **必須可比較。** 每次 `shot` 都會在圖片旁寫一個旁置檔 `<name>.sight.json`（取代副檔名），記錄目標（`window` + `hwnd`，或 `region` + 矩形）、相對於視窗的 `crop`、裁切後縮放前的像素大小（`source`）、儲存大小（`image`）與 `format`。`--baseline` 會拿它與新的擷取核對：目標類型或 `--crop` 不同、圖片與旁置檔不再一致、或檔案不存在時，回傳帶 `hint` 的 `INVALID_ARGS`。移動視窗沒問題，因為裁切和比較都是相對於視窗的。不是 sight 截的圖（沒有旁置檔）會被當作未縮放的 1:1 影像，並給出警告 `baseline_without_metadata`；它的大小與本次擷取不同時是 `INVALID_ARGS`。
+- **視窗大小變了算作變化。** 視窗（或 `--crop` 的結果）的像素大小（裁切後、縮放前）與基準圖不同時，會回報為已變化（`changed:true`，`change_ms` 約等於第一幀抵達的時間），並帶警告 `baseline_size_changed: {"baseline":{"w":642,"h":452},"now":{"w":742,"h":512}}`，之後照常套用 `--settle`。點擊經常會讓視窗變大或展開，代理需要的是這個結果，而不是一個錯誤。若新的大小使 `--crop` 超出視窗，仍照常回傳 `INVALID_ARGS`，`hint` 給出視窗大小。
 - **JPEG 與縮放過的基準圖不需要容差。** `shot` 預設存 JPEG（品質 80），預設的 `--max-edge` 也會縮小大視窗。這裡不做模糊比對，而是把即時幀先經過與 `shot` 相同的縮放、相同的 JPEG 編碼/解碼再比較，所以相同的像素必然完全相等。`--max-edge 0` 的 `.png` 仍然最省（不用逐幀轉換）。唯一的例外：縮放過或 JPEG 的基準圖不能用於跨多個螢幕或超出螢幕邊緣的 `--region`（或彈出視窗的螢幕擷取後備），那會回傳 `INVALID_ARGS`，請改用 `--max-edge 0` 的 `.png`。
-- 其他警告：`baseline_metadata_unreadable`、`baseline_metadata_not_written`（旁置檔寫不出來）。
+- 其他警告：`baseline_size_changed`、`baseline_metadata_unreadable`、`baseline_metadata_not_written`（旁置檔寫不出來）。
 
 ### `wait`
 
@@ -217,7 +218,7 @@ screen_y = 278 + 200 / 0.9273 ≈ 278 + 215.7 = 494
 | 錯誤碼 | 結束代碼 | 意義 | `hint` |
 |---|---|---|---|
 | （成功） | 0 | | |
-| `INVALID_ARGS` | 1 | 參數錯誤或互相衝突（含解析錯誤）、`--crop` 與 `--region` 併用、`--crop` 超出視窗、`--baseline` 讀不出或不可比較 | run `sight --help` for usage（`--crop` 出錯時 `hint` 給出視窗大小） |
+| `INVALID_ARGS` | 1 | 參數錯誤或互相衝突（含解析錯誤）、`--crop` 與 `--region` 併用、`--crop` 超出視窗、`--baseline` 讀不出、目標或 `--crop` 不同，或是大小不同的外來圖片 | run `sight --help` for usage（`--crop` 出錯時 `hint` 給出視窗大小） |
 | `TARGET_NOT_FOUND` | 2 | 找不到該 pid / hwnd / 可見視窗 | run `sight list` to see available targets |
 | `WINDOW_MINIMIZED` | 3 | 目標視窗已最小化 | restore the window and retry |
 | `WINDOW_PROTECTED` | 3 | 視窗禁止被擷取，不要重試 | the window opted out of capture (display affinity) |

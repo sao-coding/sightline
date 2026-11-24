@@ -130,7 +130,7 @@ sight shot --hwnd 15603054 --settle 300   # 等畫面穩定後擷取
    {"v":1,"ok":true,"data":{"changed":true,"change_ms":318,"settled":true,"elapsed_ms":502},"warnings":[]}
    ```
 
-   同樣的順序，用 `wait --change` 而不帶 `--baseline`，會得到假的 `TIMEOUT`。每張截圖都會寫一個旁置檔 `before.sight.json`；來自別的視窗、`--crop` 不同、或視窗被調整過大小的基準會回傳 `INVALID_ARGS`，絕不會悄悄做錯誤的比較。
+   同樣的順序，用 `wait --change` 而不帶 `--baseline`，會得到假的 `TIMEOUT`。每張截圖都會寫一個旁置檔 `before.sight.json`；來自別的目標類型（視窗 vs 區域）、`--crop` 不同的基準會回傳 `INVALID_ARGS`，絕不會悄悄做錯誤的比較。視窗自基準圖之後被調整或展開了大小，則算作變化（`changed:true`，並帶警告 `baseline_size_changed`）。
 
 5. **再驗證。** 再跑一次相同的 `shot` 來比對。要看效能，就在程式工作時跑 `stat`：
 

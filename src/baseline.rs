@@ -88,6 +88,9 @@ fn jpeg_roundtrip(rgb: RgbImage) -> RgbImage {
         .to_rgb8()
 }
 
+/// A matched baseline, plus (baseline size, current size) when those differ.
+pub type Prepared = (Arc<Baseline>, Option<(Size, Size)>);
+
 /// A baseline file read from disk, not yet matched to a capture.
 pub struct Loaded {
     img: RgbImage,
@@ -140,12 +143,16 @@ impl Loaded {
 
     /// Check this baseline against the capture about to run (`source` is its
     /// pixel size after `--crop`, before scaling) and make it comparable.
+    ///
+    /// A different pixel size is not an error when the baseline has metadata (a
+    /// click often resizes or expands the window): the baseline then compares as
+    /// changed, and the second value reports (baseline size, current size).
     pub fn prepare(
         &self,
         target: TargetId,
         crop: Option<Rect>,
         source: (u32, u32),
-    ) -> Result<Arc<Baseline>, SightError> {
+    ) -> Result<Prepared, SightError> {
         let name = self.path.display();
         let (w, h) = self.img.dimensions();
         let live = Size {
@@ -177,25 +184,26 @@ impl Loaded {
             // No metadata: the file can only be compared 1:1.
             saved
         };
-        if source_size != live {
-            let scaled = if self.meta.is_none() {
-                " (no .sight.json next to it, so it is assumed to be unscaled)"
-            } else {
-                ""
-            };
+        let resized = source_size != live;
+        if resized && self.meta.is_none() {
             return Err(bad(
                 format!(
-                    "--baseline {name} shows {}x{} px but this capture is {}x{} px (after --crop, before scaling){scaled}",
+                    "--baseline {name} shows {}x{} px but this capture is {}x{} px (after --crop, before scaling); \
+                     it has no .sight.json next to it, so it is assumed to be unscaled",
                     source_size.w, source_size.h, live.w, live.h
                 ),
-                "take the baseline with the same --crop/--max-edge 0, and do not resize the window in between",
+                "take the baseline with `sight shot`, which also writes the .sight.json this check needs",
             ));
         }
-        Ok(Arc::new(Baseline {
+        let baseline = Baseline {
             rgb: self.img.clone(),
-            source: live,
+            // For a resized baseline this stays its own size, so every live
+            // frame (of another size) compares as changed.
+            source: source_size,
             lossy: self.lossy,
-        }))
+            size_changed: resized,
+        };
+        Ok((Arc::new(baseline), resized.then_some((source_size, live))))
     }
 }
 
@@ -205,6 +213,8 @@ pub struct Baseline {
     /// Size of the live frame this was matched to.
     source: Size,
     lossy: bool,
+    /// The capture has another size than the baseline: always "changed".
+    size_changed: bool,
 }
 
 impl Baseline {
@@ -216,6 +226,9 @@ impl Baseline {
     /// for a capture split across monitors. Resized or lossy baselines cannot
     /// be cut, so they only work when `r` is the whole frame.
     pub fn sub(self: &Arc<Self>, r: Rect) -> Result<Arc<Baseline>, SightError> {
+        if self.size_changed {
+            return Ok(self.clone()); // every part has the wrong size anyway
+        }
         let whole =
             r.x == 0 && r.y == 0 && r.w as u32 == self.source.w && r.h as u32 == self.source.h;
         if whole {
@@ -233,6 +246,7 @@ impl Baseline {
             rgb,
             source: Size { w, h },
             lossy: false,
+            size_changed: false,
         }))
     }
 
@@ -314,6 +328,7 @@ mod tests {
                 h: source.1,
             },
             lossy,
+            size_changed: false,
         }
     }
 
@@ -393,6 +408,76 @@ mod tests {
                 })
                 .is_ok()
         );
+    }
+
+    fn loaded(w: u32, h: u32, meta: Option<Meta>) -> Loaded {
+        Loaded {
+            img: RgbImage::new(w, h),
+            lossy: false,
+            meta,
+            path: PathBuf::from("b.png"),
+        }
+    }
+
+    fn meta(target: TargetId, crop: Option<Rect>, w: u32, h: u32) -> Meta {
+        Meta {
+            v: 1,
+            target,
+            crop,
+            source: Size { w, h },
+            image: Size { w, h },
+            format: "png".into(),
+        }
+    }
+
+    #[test]
+    fn size_difference_is_a_change_but_other_mismatches_are_errors() {
+        let win = TargetId::Window { hwnd: 7 };
+        let m = meta(win, None, 10, 8);
+        let l = loaded(10, 8, Some(m));
+        // Same size: fine, nothing to report.
+        let (b, resized) = l.prepare(win, None, (10, 8)).unwrap();
+        assert!(resized.is_none());
+        assert_eq!(b.diff(&vec![0u8; 10 * 8 * 4], 10, 8), 0);
+        // Bigger window: ok, reported, and every frame compares as changed.
+        let (b, resized) = l.prepare(win, None, (14, 8)).unwrap();
+        let (was, now) = resized.unwrap();
+        assert_eq!((was.w, was.h, now.w, now.h), (10, 8, 14, 8));
+        assert_eq!(b.diff(&vec![0u8; 14 * 8 * 4], 14, 8), usize::MAX);
+        assert!(
+            b.sub(Rect {
+                x: 0,
+                y: 0,
+                w: 5,
+                h: 8
+            })
+            .is_ok()
+        );
+        // Still errors: other window/target kind, other crop.
+        assert!(
+            l.prepare(TargetId::Window { hwnd: 8 }, None, (10, 8))
+                .is_err()
+        );
+        let region = TargetId::Region {
+            rect: Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 8,
+            },
+        };
+        assert!(l.prepare(region, None, (10, 8)).is_err());
+        let c = Rect {
+            x: 1,
+            y: 1,
+            w: 4,
+            h: 4,
+        };
+        assert!(l.prepare(win, Some(c), (4, 4)).is_err());
+        // No sidecar: a size difference stays an error, equal size is accepted.
+        let foreign = loaded(10, 8, None);
+        assert!(foreign.prepare(win, None, (14, 8)).is_err());
+        assert!(foreign.prepare(win, None, (10, 8)).is_ok());
     }
 
     #[test]
