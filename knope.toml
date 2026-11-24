@@ -21,39 +21,16 @@ name = "document-change"
 [[workflows.steps]]
 type = "CreateChangeFile"
 
-# Bump Cargo.toml, update CHANGELOG.md, commit, push, then tag and create the
-# GitHub release (uploading the assets above, which CI builds beforehand).
-[[workflows]]
-name = "release"
-
-[[workflows.steps]]
-type = "PrepareRelease"
-
-[[workflows.steps]]
-type = "Command"
-command = "cargo update --workspace"
-
-[[workflows.steps]]
-type = "Command"
-command = "git add Cargo.toml Cargo.lock CHANGELOG.md"
-
-[[workflows.steps]]
-type = "Command"
-command = "git commit -m \"chore: release v$version\""
-variables = { "$version" = "Version" }
-
-[[workflows.steps]]
-type = "Command"
-command = "git push"
-
-[[workflows.steps]]
-type = "Release"
-
-# CI step 1: bump version, update changelog, commit and push.
+# Step 1 (CI, prepare-release workflow): put the version bump and changelog on a
+# `release` branch and open or update a PR to main. Never pushes to main.
 [[workflows]]
 name = "prepare-release"
 
 [[workflows.steps]]
+type = "Command"
+command = "git switch -C release"
+
+[[workflows.steps]]
 type = "PrepareRelease"
 
 [[workflows.steps]]
@@ -62,7 +39,7 @@ command = "cargo update --workspace"
 
 [[workflows.steps]]
 type = "Command"
-command = "git add Cargo.toml Cargo.lock CHANGELOG.md"
+command = "git add Cargo.toml Cargo.lock CHANGELOG.md .changeset"
 
 [[workflows.steps]]
 type = "Command"
@@ -71,11 +48,22 @@ variables = { "$version" = "Version" }
 
 [[workflows.steps]]
 type = "Command"
-command = "git push"
+command = "git push --force --set-upstream origin release"
 
-# CI step 2: tag and create the GitHub release with the built assets.
+[[workflows.steps]]
+type = "CreatePullRequest"
+base = "main"
+
+[workflows.steps.title]
+template = "chore: release v$version"
+
+[workflows.steps.body]
+template = "Merging this PR publishes v$version.\n\n$changelog"
+
+# Step 2 (CI, release workflow, after the release PR is merged): tag and create
+# the GitHub release with the assets above, which CI builds beforehand.
 [[workflows]]
-name = "publish"
+name = "release"
 
 [[workflows.steps]]
 type = "Release"
